@@ -171,26 +171,6 @@ inline atom copy(atom a)
 
 
 //-----------------------------------------------------------------------------
-// quote
-namespace detail {
-class quote{};
-}
-
-inline atom quote(atom a){ return cons(atom(detail::quote()),a); }
-inline bool is_quote(atom a){ return is<detail::quote>(a); }
-
-inline atom unquote(atom a)
-{
-    if(is_quote(car(a))
-    {
-        do{ a = cdr(a); } while(is_quote(car(a)));
-        return a;
-    }
-    else{ return a; }
-}
-
-
-//-----------------------------------------------------------------------------
 // list  
 namespace detail {
 template <typename A>
@@ -345,6 +325,26 @@ atom append(atom a, atom b, As&&... as)
 
 
 //-----------------------------------------------------------------------------
+// quote
+namespace detail {
+class quote{};
+}
+
+inline atom quote(atom a){ return cons(atom(detail::quote()),a); }
+inline bool is_quoted(atom a){ return is<detail::quote>(a); }
+
+inline atom unquote(atom a)
+{
+    if(is_quoted(car(a))
+    {
+        do{ a = cdr(a); } while(is_quoted(car(a)));
+        return a;
+    }
+    else{ return a; }
+}
+
+
+//-----------------------------------------------------------------------------
 // atom printing 
 
 namespace detail {
@@ -397,51 +397,43 @@ inline const char* atom_type_name(atom a){ return detail::print_map::instance()-
 
 namespace detail {
 template <typename STREAM>
-inline void fprint(STREAM&& s, atom a);
+inline std::string to_string(atom a);
 
 template <typename STREAM>
-inline void fprint1(STREAM&& s, atom a)
+inline std::string to_string1(atom a)
 {
-    if(is_cons(a)){ fprint(std::forward<STREAM>(s),a); }
-    else if(is_quote(a)){ s << "'"; }
-    else if(is_nil(a)){ s << "nil"; }
-    else{ s << atom_type_name(a); }
+    if(is_cons(a)){ return to_string(a); }
+    else if(is_quoted(a)){ return std::string("'"); }
+    else if(is_nil(a)){ return std::string("nil"); }
+    else{ return atom_type_name(a); }
 }
 
-template <typename STREAM>
-inline void fprint(STREAM&& s, atom a)
+inline std::string to_string(atom a)
 { 
+    std::string s;
     if(is_cons(a))
     {
-        if(is_quote(car(a))){ s << "'("; }
+        if(is_quoted(car(a))){ s+=std::string("'("); }
         else 
         {
-            s << "("; 
-            fprint1(car(a));
+            s+=std::string("("); 
+            s+=to_string1(car(a));
         }
 
         a = cdr(a);
 
         while(!is_nil(a))
         {
-            s << " "; 
-            fprint1(std::forward<STREAM>(s),a);
+            s+=std::string(" "); 
+            s+=to_string1(a);
             a = cdr(a);
         }
-        s << ")";
+        s+=std::string(")");
     }
-    else{ fprint1(std::forward<STREAM>(s),a); }
+    else{ s+=to_string1(a); }
+    return s;
 }
 }
-
-template <typename STREAM>
-inline void fprint(STREAM&& s, atom a)
-{
-    detail::fprint(std::forward<STREAM>(s),a);
-    s << std::endl;
-}
-
-inline void print(atom a){ fprint(std::cout,a); }
 
 
 //-----------------------------------------------------------------------------

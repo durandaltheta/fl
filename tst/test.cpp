@@ -62,13 +62,6 @@ TEST(cons,cons_cell_copy){}
 
 
 //-----------------------------------------------------------------------------
-// quote tests
-TEST(quote,quote){}
-TEST(quote,is_quote){}
-TEST(quote,unquote){}
-
-
-//-----------------------------------------------------------------------------
 // list tests
 TEST(list,inspect_list){}
 TEST(list,is_list){}
@@ -82,9 +75,15 @@ TEST(list,append){}
 
 
 //-----------------------------------------------------------------------------
-// print tests
-TEST(print,fprint){}
-TEST(print,print){}
+// quote tests
+TEST(quote,quote){}
+TEST(quote,is_quoted){}
+TEST(quote,unquote){}
+
+
+//-----------------------------------------------------------------------------
+// to_string tests
+TEST(to_string,to_string){}
 
 
 //-----------------------------------------------------------------------------

@@ -99,9 +99,9 @@ inline bool equalp(atom lhs, atom rhs)
 
 // forcibly set value of atom 
 template <typename T>
-atom set(atom a, T&& t)
+atom setv(atom a, T&& t)
 { 
-    std::any_cast<T>(**(a.a)) = t; 
+    **(a.a) = std::forward<T>(t); 
     return a;
 }
 
@@ -181,17 +181,17 @@ inline bool is_quote(atom a){ return is<detail::quote>(a); }
 
 inline atom unquote(atom a)
 {
-    if(is_quote(a)
+    if(is_quote(car(a))
     {
-        do{ a = cdr(a); } while(is_quote(a));
+        do{ a = cdr(a); } while(is_quote(car(a)));
+        return a;
     }
     else{ return a; }
 }
 
 
 //-----------------------------------------------------------------------------
-// fl::list  
-
+// list  
 namespace detail {
 template <typename A>
 atom list_(A&& a){ return cons(std::forward<A>(a),nil()); }
@@ -663,7 +663,7 @@ atom rem(A&& a, B&& b, As&&... as)
 
 
 //-----------------------------------------------------------------------------
-// evaluation of atoms as functions and arguments
+// eval of atoms as functions and arguments
 
 // fl::function definition, an std::function that takes 1 atom as an 
 // argument and returns an atom
@@ -872,7 +872,7 @@ inline atom eval(atom a)
 
 
 //-----------------------------------------------------------------------------
-// map
+// iteration
 namespace detail {
 void iterate_(){ return; }
 

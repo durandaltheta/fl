@@ -5,7 +5,7 @@ This project is a header only library which enables lisp-like functional program
 - generic datatype `atom`:
     - can accept any value
     - memory efficient by allowing const-like value re-use
-    - enables value semantics for pointed to data 
+    - enables by-value semantics for pointed to data 
     - various utilities for interacting with atoms with the following functions and templates:
         - `nil`
         - `is_nil`

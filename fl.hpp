@@ -528,7 +528,7 @@ curry<std::function<R(T)>>
         [=](atom a) {
             return curry<std::function<R(atom)>>(
                 [=](Ts&&...ts){
-                    return fun(value<T>(a));
+                    return fun(value<T&>(a));
                 }
             ).result;
         }
@@ -576,9 +576,9 @@ curry<std::function<R(T,Ts...)>>
 
     curry(std::function<R(T,Ts...)> fun) : 
     result(
-        [=](T&& t){
+        [=](a){
             return curry<std::function<R(Ts...)>>(
-                [=](Ts&&...ts){ return fun(t, ts...); }
+                [=](Ts&&...ts){ return fun(value<T&>(a), ts...); }
             ).result;
         }
     ) 

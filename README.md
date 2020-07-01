@@ -39,7 +39,10 @@ This project is a header only library which enables lisp-like functional program
     - can acquire a string representation of an `atom`s or `list`s stored type name(s) with:
         - `to_string`
 - evaluation of `atom`s as code
-    - arbitrary std::function/function pointer conversion to the `atom` datatype with function `atomize_function`
+    - arbitrary std::function/function pointer conversion to the `atom` datatype with function `atomize_function` which enables the following features for said functions:
+        - ability to be `eval`uated
+        - ability to curry said function into one that can accept arguments as a list
+        - ability to automatically attempt to retrieve the expected typed value from each atom based on the typeof each argument in the original function. The exception to this behavior is if the function expects a atom for a given argument then an unmodified atom will be passed to it.
     - ability to evaluate an atom with function `eval`
 - ability to iterate `list`s and apply functions to their data 
     - `map` can apply a function to one or more `list`s by index and construct another list of all the function results 

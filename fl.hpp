@@ -17,7 +17,226 @@ namespace fl {
 namespace detail {
 template <typename T>
 using unqualified = typename std::decay<T>::value;
+
+template <typename R, typename... As>
+struct function_traits<R(As...)>
+{
+    typedef R return_type;
+    constexpr size_t arity = sizeof...(As);
+    template <size_t i>
+    using arg = typename std::tuple_element<i, std::tuple<As...>>::type;
+};
 }
+
+
+
+//-----------------------------------------------------------------------------
+// fl::function
+
+struct atom; // forward declaration
+
+// fl::function definition, an std::function that takes 1 atom as an 
+// argument and returns an atom
+typedef std::function<atom(atom)> function;
+
+template <typename R, typename... As>
+const std::function<R(As...)>& to_std_function(const std::function<R(As...)>& f){ return f; }
+
+template <typename R, typename... As>
+std::function<R(As...)> to_std_function(std::function<R(As...)>&& f){ return std::move(f); }
+
+template <typename F>
+std::function<decltype(F)> to_std_function(F&& f)
+{ 
+    std::function<decltype(F)> std_f = f;
+    return std_f;
+}
+
+// curry 
+// transform any std::function into one that accepts its arguments as atoms one 
+// at a time
+namespace detail {
+template <typename FUNCTION> struct
+curry;
+
+// final specialization
+template <> struct
+curry<function> 
+{
+    using
+    type = function;
+
+    const type
+    result;
+
+    curry(type fun) : result(fun) {}
+};
+
+// specialization for void return type
+template <> struct
+curry<std::function<void(atom)>> 
+{
+    using
+    type = std::function<R(T)>;
+
+    const type
+    result;
+
+    curry(std::function<R(atom)> fun) : 
+    result(
+        [=](atom a){
+            return curry<function>(
+                [=](){
+                    fun(a);
+                    return atom(); // return nil
+                }
+            ).result;
+        }
+    ) 
+    {}
+};
+
+// specialization for non-atom return type
+template <typename R> struct
+curry<std::function<R(atom)>> 
+{
+    using
+    type = std::function<R(atom)>;
+
+    const type
+    result;
+
+    curry(std::function<R(atom)> fun) : 
+    result(
+        [=](atom a){
+            return curry<function>(
+                [=](){
+                    return atom(fun(a));
+                }
+            ).result;
+        }
+    ) 
+    {}
+};
+
+// specialization for functions with a single argument
+template <typename R, typename T> struct
+curry<std::function<R(T)>> 
+{
+    using
+    type = std::function<R(T)>;
+
+    const type
+    result;
+
+    // all other argument types
+    curry(std::function<R(T)> fun) : 
+    result (
+        [=](atom a) {
+            return curry<std::function<R(atom)>>(
+                [=](Ts&&...ts){
+                    return fun(value<T&>(a));
+                }
+            ).result;
+        }
+    ) 
+    {}
+};
+
+// recursive atom specialization for functions with more arguments
+template <typename R, typename...Ts> struct
+curry<std::function<R(atom,Ts...)>> 
+{
+    using
+    remaining_type = typename curry<std::function<R(Ts...)> >::type;
+
+    using
+    type = std::function<remaining_type(atom)>;
+
+    const type
+    result;
+
+    // atom accepting variant
+    curry(std::function<R(atom,Ts...)> fun) : 
+    result(
+        [=](atom a){
+            return curry<std::function<R(Ts...)>>(
+                [=](Ts&&...ts){ return fun(a, ts...); }
+            ).result;
+        }
+    ) 
+    {}
+};
+
+// recursive specialization for functions with more arguments
+template <typename R, typename T,typename...Ts> struct
+curry<std::function<R(T,Ts...)>> 
+{
+    using
+    remaining_type = typename curry<std::function<R(Ts...)> >::type;
+
+    using
+    type = std::function<remaining_type(atom)>;
+
+    const type
+    result;
+
+    curry(std::function<R(T,Ts...)> fun) : 
+    result(
+        [=](a){
+            return curry<std::function<R(Ts...)>>(
+                [=](Ts&&...ts){ return fun(value<T&>(a), ts...); }
+            ).result;
+        }
+    ) 
+    {}
+};
+}
+
+// curry takes any std::function or function pointer and returns a 
+// std::function<atom(atom)>
+template <typename R, typename... Ts> 
+auto
+curry(const std::function<R(Ts...)>& f)
+-> typename detail::curry<std::function<R(Ts...)>>::type
+{
+    return detail::curry<std::function<R(Ts...)>>(f).result;
+}
+
+template <typename R, typename... Ts> 
+auto
+curry(R(* const f)(Ts...))
+-> typename detail::curry<std::function<R(Ts...)>>::type
+{
+    return detail::curry<std::function<R(Ts...)>>(f).result;
+}
+
+
+// atomize_function will take any std::function object and return an atom which 
+// can be executed in eval()
+
+namespace detail {
+atom eval_curried_function(const function& f, atom a){ return f(a); }
+atom eval_curried_function(function&& f, atom a){ return f(a); }
+
+// recursive variation
+template <typename F>
+atom eval_curried_function(F&& f, atom a){ return eval_curried_function(f(car(a)),cdr(a)); }
+}
+
+// atomize_function converts any callable to an fl::function
+template <typename F>
+function to_fl_function(F&& f)
+{
+    function af = [=](atom a) -> atom
+    {
+        auto std_f = to_std_function(std::forward<F>(f));
+        auto curried_f = curry(std_f);
+        return detail::eval_curried_function(curried_f,a); 
+    };
+    return af;
+}
+
 
 
 //-----------------------------------------------------------------------------
@@ -38,6 +257,17 @@ struct atom
     atom(T&& t)
     {
         static REGISTER_TYPE__(T);
+        make_shared_T(std::forward<T>(t),typename std::is_function<T>::type>
+    }
+
+    void make_shared_T(T&& t, std::true_type)
+    {
+        auto f = to_fl_function(std::forward<T>(t));
+        a = std::make_shared<std::optional<std::any>>(std::move(f));
+    }
+
+    void make_shared_T(T&& t, std::false_type)
+    {
         a = std::make_shared<std::optional<std::any>>(std::forward<T>(t));
     }
 
@@ -52,6 +282,7 @@ struct atom
 
 inline atom nil(){ return atom(); }
 inline bool is_nil(atom a) const { return a ? false : true; }
+
 
 
 //-----------------------------------------------------------------------------
@@ -74,6 +305,7 @@ template <typename T>
 T value(atom&& a) { return std::any_cast<T&&>(**(a.a)); }
 
 
+
 //-----------------------------------------------------------------------------
 // comparison  
 
@@ -92,6 +324,7 @@ inline bool equalp(atom lhs, atom rhs)
 }
 
 
+
 //-----------------------------------------------------------------------------
 // mutable operations 
 
@@ -108,6 +341,7 @@ atom setv(atom a, T&& t)
 // return a mutable reference to the value of an atom
 template <typename T>
 T& mutable_value(atom& a) const { return std::any_cast<T&>(**(a.a)); }
+
 
 
 //-----------------------------------------------------------------------------
@@ -157,8 +391,14 @@ public:
 };
 }
 
+template <typename A, typename B>
+inline atom cons(A&& a, B&& b)
+{ 
+    return atom(detail::cons_cell(atom(std::forward<A>(a)), 
+                                  atom(std::forward<B>(b)))); 
+}
+
 inline bool is_cons(atom a) const { return is<detail::cons_cell>(a) ? true : false; }
-inline atom cons(atom a, atom b){ return atom(detail::cons_cell(a, b)); }
 inline atom car(atom a){ return value<detail::cons_cell>(a).car; }
 inline atom cdr(atom a){ return value<detail::cons_cell>(a).cdr; }
 
@@ -168,6 +408,7 @@ inline atom copy(atom a)
     *(b.a) = *(a.a.);
     return b;
 }
+
 
 
 //-----------------------------------------------------------------------------
@@ -324,6 +565,7 @@ atom append(atom a, atom b, As&&... as)
 }
 
 
+
 //-----------------------------------------------------------------------------
 // quote
 namespace detail {
@@ -342,6 +584,23 @@ inline atom unquote(atom a)
     }
     else{ return a; }
 }
+
+
+
+//-----------------------------------------------------------------------------
+// eval 
+
+// eval allows data to be treated as code, assuming that the given atom is a
+// fl::function to be executed. 
+inline atom eval(atom a)
+{ 
+    if(a && is<const function&>(a))
+    {
+        return value<const function&>(car(a))(cdr(a)); 
+    }
+    else{ return a; }
+}
+
 
 
 //-----------------------------------------------------------------------------
@@ -436,214 +695,6 @@ inline std::string to_string(atom a)
 }
 
 
-//-----------------------------------------------------------------------------
-// eval of atoms as functions and arguments
-
-// fl::function definition, an std::function that takes 1 atom as an 
-// argument and returns an atom
-typedef std::function<atom(atom)> function;
-
-// curry 
-// transform any std::function into one that accepts its arguments as atoms one 
-// at a time
-namespace detail {
-template <typename FUNCTION> struct
-curry;
-
-struct done {};
-
-// final specialization
-template <> struct
-curry<std::function<atom(atom)>> 
-{
-    using
-    type = std::function<atom(atom)>;
-
-    const type
-    result;
-
-    curry(type fun) : result(fun) {}
-};
-
-// specialization for void return type
-template <> struct
-curry<std::function<void(atom)>> 
-{
-    using
-    type = std::function<R(T)>;
-
-    const type
-    result;
-
-    curry(std::function<R(atom)> fun) : 
-    result(
-        [=](atom a){
-            return curry<std::function<atom(atom)>>(
-                [=](){
-                    fun(a);
-                    return atom();
-                }
-            ).result;
-        }
-    ) 
-    {}
-};
-
-// specialization for non-atom return type
-template <typename R> struct
-curry<std::function<R(atom)>> 
-{
-    using
-    type = std::function<R(atom)>;
-
-    const type
-    result;
-
-    curry(std::function<R(atom)> fun) : 
-    result(
-        [=](atom a){
-            return curry<std::function<atom(atom)>>(
-                [=](){
-                    return atom(fun(a));
-                }
-            ).result;
-        }
-    ) 
-    {}
-};
-
-// specialization for functions with a single argument
-template <typename R, typename T> struct
-curry<std::function<R(T)>> 
-{
-    using
-    type = std::function<R(T)>;
-
-    const type
-    result;
-
-    // all other argument types
-    curry(std::function<R(T)> fun) : 
-    result (
-        [=](atom a) {
-            return curry<std::function<R(atom)>>(
-                [=](Ts&&...ts){
-                    return fun(value<T&>(a));
-                }
-            ).result;
-        }
-    ) 
-    {}
-};
-
-// recursive atom specialization for functions with more arguments
-template <typename R, typename...Ts> struct
-curry<std::function<R(atom,Ts...)>> 
-{
-    using
-    remaining_type = typename curry<std::function<R(Ts...)> >::type;
-
-    using
-    type = std::function<remaining_type(atom)>;
-
-    const type
-    result;
-
-    // atom accepting variant
-    curry(std::function<R(atom,Ts...)> fun) : 
-    result(
-        [=](atom a){
-            return curry<std::function<R(Ts...)>>(
-                [=](Ts&&...ts){ return fun(a, ts...); }
-            ).result;
-        }
-    ) 
-    {}
-};
-
-// recursive specialization for functions with more arguments
-template <typename R, typename T,typename...Ts> struct
-curry<std::function<R(T,Ts...)>> 
-{
-    using
-    remaining_type = typename curry<std::function<R(Ts...)> >::type;
-
-    using
-    type = std::function<remaining_type(atom)>;
-
-    const type
-    result;
-
-    curry(std::function<R(T,Ts...)> fun) : 
-    result(
-        [=](a){
-            return curry<std::function<R(Ts...)>>(
-                [=](Ts&&...ts){ return fun(value<T&>(a), ts...); }
-            ).result;
-        }
-    ) 
-    {}
-};
-}
-
-// curry takes any std::function or function pointer and returns a 
-// std::function<atom(atom)>
-template <typename R, typename... Ts> 
-auto
-curry(const std::function<R(Ts...)>& f)
--> typename detail::curry<std::function<R(Ts...)>>::type
-{
-    return detail::curry<std::function<R(Ts...)>>(f).result;
-}
-
-template <typename R, typename... Ts> 
-auto
-curry(R(* const f)(Ts...))
--> typename detail::curry<std::function<R(Ts...)>>::type
-{
-    return detail::curry<std::function<R(Ts...)>>(f).result;
-}
-
-
-// atomize_function will take any std::function object and return an atom which 
-// can be executed in eval()
-
-// handle identify variants
-inline atom atomize_function(function& f){ return atom(f); }
-inline atom atomize_function(function&& f){ return atom(std::move(f)); }
-
-namespace detail {
-atom eval_curried_function(const function& f, atom a){ return f(a); }
-atom eval_curried_function(function&& f, atom a){ return f(a); }
-
-// recursive variation
-template <typename F>
-atom eval_curried_function(F&& f, atom a){ return eval_curried_function(f(car(a)),cdr(a)); }
-}
-
-template <typename F>
-atom atomize_function(F&& f)
-{
-    function af = [=](atom a) -> atom
-    {
-        auto curried_f = curry(f);
-        return detail::eval_curried_function(curried_f,a); 
-    };
-    return atom(af);
-};
-
-
-// eval allows data to be treated as code, assuming that the given atom is a
-// fl::function to be executed. 
-inline atom eval(atom a)
-{ 
-    if(a && is<function>(a))
-    {
-        return value<function>(car(a))(cdr(a)); 
-    }
-    else{ return a; }
-}
-
 
 //-----------------------------------------------------------------------------
 // iteration
@@ -725,6 +776,7 @@ atom foldrl(F&& f, size_t len, atom init, atom a, As... as)
 }
 
 
+
 //-----------------------------------------------------------------------------
 // std:: container conversions
 
@@ -803,6 +855,7 @@ C reconstitute_container(atom a)
     }
     else{ return C(); }
 }
+
 
 
 //-----------------------------------------------------------------------------
@@ -904,6 +957,7 @@ private:
     mutable atom a;
 };
 } // end fl
+
 
 
 //-----------------------------------------------------------------------------

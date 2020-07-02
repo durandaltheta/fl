@@ -290,7 +290,7 @@ public:
     atom(T&& t){ set(std::forward<T>(t); }
 
     // compare atom's real typed T values with the == operator 
-    inline bool equalv(const atom& b) const { return caf(*this,b); }
+    inline bool equalv(atom b) const { return caf(*this,b); }
 
     // allows direct value comparison such as:
     // a.equalv(3);
@@ -298,7 +298,7 @@ public:
     template <typename T>
     inline bool equalv(T&& t) const { return caf(*this,atom(std::forward<T>(t))); }
 
-    inline bool equalp(const atom& b) const { return ctx.get() == b.ctx.get() }
+    inline bool equalp(atom b) const { return ctx.get() == b.ctx.get() }
 
     bool is_nil() const { return ctx ? false : true; }
 

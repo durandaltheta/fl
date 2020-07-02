@@ -7,9 +7,12 @@
 #include <typeinfo>
 #include <type_traits>
 #include <iostream>
+#include <ostream>
 #include <mutex>
 #include <string>
 #include <stringstream>
+#include <unordered_map>
+#include <exception>
 
 namespace fl { 
 
@@ -34,7 +37,7 @@ struct function_traits<R(As...)>
 //-----------------------------------------------------------------------------
 // fl::function
 
-struct atom; // forward declaration
+class atom; // forward declaration
 
 // fl::function definition, an std::function that takes 1 atom as an 
 // argument and returns an atom
@@ -136,7 +139,7 @@ curry<std::function<R(T)>>
         [=](atom a) {
             return curry<std::function<R(atom)>>(
                 [=](Ts&&...ts){
-                    return fun(value<T&>(a));
+                    return fun(value<T>(a));
                 }
             ).result;
         }
@@ -186,7 +189,7 @@ curry<std::function<R(T,Ts...)>>
     result(
         [=](a){
             return curry<std::function<R(Ts...)>>(
-                [=](Ts&&...ts){ return fun(value<T&>(a), ts...); }
+                [=](Ts&&...ts){ return fun(value<T>(a), ts...); }
             ).result;
         }
     ) 
@@ -213,10 +216,8 @@ curry(R(* const f)(Ts...))
 }
 
 
-// atomize_function will take any std::function object and return an atom which 
-// can be executed in eval()
-
 namespace detail {
+// apply atoms one at a time to curried function
 atom eval_curried_function(const function& f, atom a){ return f(a); }
 atom eval_curried_function(function&& f, atom a){ return f(a); }
 
@@ -227,7 +228,7 @@ atom eval_curried_function(F&& f, atom a){ return eval_curried_function(f(car(a)
 
 // atomize_function converts any callable to an fl::function
 template <typename R, typename... As>
-function to_fl_function(std::function<R(As)> std_f)
+function to_fl_function(std::function<R(As...)> std_f)
 {
     function final_f = [=](atom a) -> atom
     {
@@ -254,7 +255,8 @@ function to_fl_function(F&& f)
 //-----------------------------------------------------------------------------
 // atom  
 
-struct atom;
+class atom;
+class print_map;
 
 namespace detail {
 template <typename T> class register_type; 
@@ -267,7 +269,8 @@ bool compare_atom_function__(const atom& a, const atom& b){ return false; }
 template <typename T>
 bool compare_atom_function__(const atom& a, const atom& b)
 {
-    // a is guaranteed to be type T
+    // a is guaranteed to be type T because this is used by the T templated 
+    // atom constructor
     if(b.is<T>()){ return a.value<T>() == b.value<T>(): }
     else{ return false; }
 }
@@ -276,62 +279,15 @@ bool compare_atom_function__(const atom& a, const atom& b)
 #define REGISTER_TYPE__(T) detail::register_type<T>(#T)
 
 
-struct atom 
+class atom 
 {
-private:
-    struct context 
-    {
-        std::any value;
-
-        // the function pointer stored here knows what the stored type of value 
-        // is, allowing sane/correct comparison
-        detail::compare_atom_function caf;
-
-        context(const context& rhs) : a(rhs.a), caf(rhs.caf) { }
-        context(context&& rhs) : a(std::move(rhs.a)), caf(std::move(rhs.caf)) { }
-
-        template <typename T>
-        context(T&& t, detail::compare_any_function in_caf) : a(t), caf(in_caf) { }
-
-        context& operator=(const context& rhs)
-        {
-            value = rhs.value;
-            caf = rhs.caf;
-            return *this;
-        }
-
-        context& operator=(context&& rhs)
-        {
-            value = std::move(rhs.value);
-            caf = std::move(rhs.caf);
-            return *this;
-        }
-    };
-
-    mutable std::shared_ptr<context> ctx;
-
-    void make_shared_T(T&& t, std::true_type)
-    {
-        auto f = to_fl_function(std::forward<T>(t));
-        ctx = std::make_shared<context>(std::move(f),compare_atom_function__<>);
-    }
-
-    void make_shared_T(T&& t, std::false_type)
-    {
-        ctx = std::make_shared<context>(std::forward<T>(t),compare_any_function__<T>);
-    }
-
 public:
     atom(){}
     atom(const atom& rhs) : a(rhs.ctx) {}
     atom(atom&& rhs) : a(std::move(rhs.ctx)) {}
 
     template <typename T>
-    atom(T&& t)
-    {
-        static REGISTER_TYPE__(T);
-        make_shared_T(std::forward<T>(t), std::is_function<unqualified<T>>>
-    }
+    atom(T&& t){ set(std::forward<T>(t); }
 
     // compare atom's real typed T values with the == operator 
     inline bool equalv(const atom& b) const { return caf(*this,b); }
@@ -364,7 +320,7 @@ public:
     // get atom's value as a const reference to the specified type
     template <typename T> 
     const unqualified<T>& 
-    value(){ return std::any_cast<const unqualified<T>&>(ctx->a) }
+    value() const { return std::any_cast<const unqualified<T>&>(ctx->a); }
 
     inline atom copy() const
     {
@@ -373,10 +329,81 @@ public:
         return b;
     }
 
+    // set() functions and extract() are only way to reset or modify the 
+    // underlying context. Modifying this will modify *ALL* atoms that have 
+    // copies of the current shared_ptr<context> 
+    
+    // c-string variant to ensure we can compare with std::string
+    void set(const char* t) 
+    { 
+        static REGISTER_TYPE__(std::string);
+        std::string s(t);
+        ctx = make_context(std::move(s), std::false_type());
+    }
+
+    template <typename T> 
+    void set(T&& t) 
+    { 
+        static REGISTER_TYPE__(T);
+        ctx = make_context(std::forward<T>(t), std::is_function<unqualified<T>>());
+    }
+
+    // Returns an rvalue reference allowing code to use move semantics to 
+    // extract data from the internal context. This means that the data stored 
+    // in the context will be in a valid but unknown state.
+    template <typename T>
+    unqualified<T>&& extract(){ return std::any_cast<unqualified<T>&&>(ctx->a); }
+
+
     // returns true if atom has a value, else false
     inline bool operator bool() const { return !is_nil(); }
     inline bool operator==(const atom& b) const { return equalv(b); }
     inline bool operator==(atom&& b) const { return equalv(*this,b); }
+
+private:
+    struct context 
+    {
+        std::any value;
+
+        // the function pointer stored here knows what the stored type of value 
+        // is, allowing sane/correct comparison
+        detail::compare_atom_function caf;
+
+        context(const context& rhs) : a(rhs.a), caf(rhs.caf) { }
+        context(context&& rhs) : a(std::move(rhs.a)), caf(std::move(rhs.caf)) { }
+
+        template <typename T>
+        context(T&& t, detail::compare_any_function in_caf) : a(t), caf(in_caf) { }
+
+        context& operator=(const context& rhs)
+        {
+            value = rhs.value;
+            caf = rhs.caf;
+            return *this;
+        }
+
+        context& operator=(context&& rhs)
+        {
+            value = std::move(rhs.value);
+            caf = std::move(rhs.caf);
+            return *this;
+        }
+    };
+
+    mutable std::shared_ptr<context> ctx;
+
+    context make_context(T&& t, std::true_type) const
+    {
+        auto f = to_fl_function(std::forward<T>(t));
+        return std::make_shared<context>(std::move(f),compare_atom_function__<>);
+    }
+
+    context make_context(T&& t, std::false_type) const
+    {
+        return std::make_shared<context>(std::forward<T>(t),compare_any_function__<T>);
+    }
+
+    friend class print_map;
 };
 
 inline atom nil(){ return atom(); }
@@ -395,13 +422,12 @@ template <typename T, typename T2> bool equalv(T&& lhs, T2&& rhs)
 inline bool equalp(atom lhs, atom rhs){ return lhs.equalp(rhs); }
 inline atom copy(atom a){ return a.copy(); }
 template <typename T> inline atom copy(T& t){ return atom(std::forward<T>(t)); }
+template <typename T> void set(atom a, T&& t){ a.set(std::forward<T>(t)); }
+template <typename T> T&& extract(atom a){ return a.extract<T>(); }
 
 
 //-----------------------------------------------------------------------------
 // cons_cell 
-
-// forward declarations
-bool is_cons(atom a) const; 
 
 namespace detail {
 class cons_cell 
@@ -419,6 +445,7 @@ public:
     cons_cell(const atom& a, atom&& b) : car(a), cdr(std::move(b)) {}
     cons_cell(atom&& a, const atom& b) : car(std::move(a)), cdr(b) {}
 
+    // Return a copy of internal car/cdr. 
     atom car() const { return atom(car); }
     atom cdr() const { return atom(cdr); }
 
@@ -435,7 +462,7 @@ inline atom cons(A&& a, B&& b)
                                   atom(std::forward<B>(b)))); 
 }
 
-inline bool is_cons(atom a){ return is<detail::cons_cell>(a) ? true : false; }
+inline bool is_cons(atom a){ return is<detail::cons_cell>(a); }
 inline atom car(atom a){ return value<detail::cons_cell>(a).car(); }
 inline atom cdr(atom a){ return value<detail::cons_cell>(a).cdr(); }
 
@@ -494,8 +521,21 @@ inline list_info inspect_list(atom a)
 inline bool is_list(atom a){ return inspect_list(a).is_list; }
 inline size_t length(atom a){ return inspect_list(a).length; }
 
+// cons access 
+inline atom head_cons(atom lst){ return lst }
+inline atom tail_cons(atom lst)
+{
+    atom ret = lst;
+    while(lst)
+    { 
+        ret = lst;
+        lst = cdr(lst):
+    }
+    return ret;
+}
+
 // return the cons cell in a list at index position n
-inline atom tail(atom lst, size_t n)
+inline atom nth_cons(atom lst, size_t n)
 { 
     while(n)
     {
@@ -505,20 +545,14 @@ inline atom tail(atom lst, size_t n)
     return lst;
 }
 
-inline atom front(atom lst){ return car(lst); }
-inline atom back(atom lst)
-{
-    if(is_nil(lst)){ return lst; }
-    else 
-    {
-        while(!is_nil(cdr(lst))){ lst = cdr(lst); }
-        return car(lst);
-    }
-}
+// element access
+inline atom head(atom lst){ return car(lst); }
+inline atom tail(atom lst){ return car(tail_cons(lst)); }
 
 // return the element in a list at index n
-inline atom nth(atom lst, size_t n){ return car(tail(lst,n)); }
+inline atom nth(atom lst, size_t n){ return car(nth_cons(lst,n)); }
 
+// given a list, return a list in reverse order
 inline atom reverse(atom lst)
 {
     if(is_nil(lst)){ return lst; }
@@ -535,42 +569,26 @@ inline atom reverse(atom lst)
     }
 }
 
-namespace detail {
-struct meta_list
-{
-    atom head;
-    atom tail;
-    size_t sz;
-};
-
-inline meta_list copy_list(atom lst)
+// return a value copy of a list
+inline atom copy_list(atom lst)
 {
     atom ret; // nil
     atom cur = ret;
-    size_t sz=0;
     if(is_nil(lst)){ return meta_list(ret,cur,0); } 
     else 
     {
         atom ret = cons(copy(car(lst)), copy(cdr(lst)));
         atom cur = cdr(ret);
         lst = cdr(lst);
-        ++sz;
         while(!is_nil(lst))
         {
             cur = cons(copy(car(lst)), copy(cdr(lst)));
             cur = cdr(cur);
             lst = cdr(lst);
-            ++sz
         }
         copy(cdr(cur),nil());
-        return meta_list(ret,cur,sz);
+        return ret;
     }
-}
-}
-
-inline atom copy_list(atom lst)
-{
-    return detail::copy_list(lst).head;
 }
 
 
@@ -597,6 +615,13 @@ atom append(atom a, atom b, As&&... as)
 {
     return detail::append_(a,b,as);
 }
+
+
+//TODO: need to implement the following list functions 
+/*
+ list_with_tail: list* in racket
+ build_list
+ */
 
 
 
@@ -640,36 +665,50 @@ inline atom eval(atom a)
 //-----------------------------------------------------------------------------
 // atom printing 
 
-namespace detail {
 
+namespace detail {
 class print_map
 {
 public:
     print_map* instance();
-
-    inline std::string type(atom a)
+    
+    inline std::pair<std::string,std::string> get_value_info(atom a)
     {
         std::unique_lock<std::mutex> lk(mtx_);
-        return type_map_[(*(a.a))->type().name()];
+        auto& vi = type_map_[get_std_type_name(a)];
+        return std::pair<std::string,std::string>(vi.name,vi.pr(a));
     }
 
-    inline std::string value(atom a)
+    inline std::string get_type(atom a)
     {
         std::unique_lock<std::mutex> lk(mtx_);
-        std::any& a_ref = **(a.a);
-        return type_map_[(a_ref.type().name()](a_ref);
+        return type_map_[get_std_type_name(a)].name;
+    }
+
+    inline std::string get_value(atom a)
+    {
+        std::unique_lock<std::mutex> lk(mtx_);
+        return type_map_[(get_std_type_name(a)].pr(a_ref);
     }
 
 private:
     typedef std::function<std::string(std::any&)> value_printer;
+
     std::mutex mtx_;
-    std::map<std::string,std::string> type_map_;
-    std::map<std::string,value_printer> printer_map_;
+    std::unordered_map<std::string,value_info> type_map_;
+
+    struct value_info
+    {
+        std::string name;
+        value_printer vp;
+    };
+
+    std::string get_std_type_name(atom a){ return a.ctx->a.type().name(); }
    
     //integral to_string conversion
     template <typename T,
               typename = std::enable_if_t<std::is_integral<T>::value>>
-    void register_value_printer(T& t)
+    value_printer make_value_printer(T& t)
     {
         value_printer vp = [](std::any& a) -> std::string 
         {
@@ -682,7 +721,7 @@ private:
     //float to_string conversion
     template <typename T,
               typename = std::enable_if_t<std::is_floating_point<T>::value>>
-    void register_value_printer(T& t)
+    value_printer make_value_printer(T& t)
     {
         value_printer vp = [](std::any& a) -> std::string 
         {
@@ -693,7 +732,7 @@ private:
     }
 
     //direct string conversion
-    void register_value_printer(const std::string& t)
+    value_printer make_value_printer(const std::string& t)
     {
         value_printer vp = [](std::any& a) -> std::string 
         {
@@ -703,7 +742,7 @@ private:
         return vp;
     }
 
-    void register_value_printer(const char* t)
+    value_printer make_value_printer(const char* t)
     {
         value_printer vp = [](std::any& a) -> std::string 
         {
@@ -713,7 +752,7 @@ private:
         return vp;
     }
 
-    void register_value_printer(char* t)
+    value_printer make_value_printer(char* t)
     {
         value_printer vp = [](std::any& a) -> std::string 
         {
@@ -725,7 +764,7 @@ private:
 
     // address only
     template <typename T>
-    void register_value_printer(T& t)
+    value_printer make_value_printer(T& t)
     {
         value_printer vp = [](std::any& a) -> std::string 
         {
@@ -742,14 +781,23 @@ private:
     { 
         unqualified<T> t;
         std::any a(t);
+        std::string std_type_name = a.type().name();
+
         std::unique_lock<std::mutex> lk(mtx_); 
-        std::string std_type_name = a.type().name():
-        type_map_[std_type_name] = std::string(name);
-        printer_map_[std_type_name] = register_value_printer(t);
+
+        // don't modify an already registered type
+        auto it = type_map_.find(std_type_name);
+        if(it == type_map_.end())
+        {
+            value_info vi;
+            vi.name = std::string(name);
+            vi.pr = make_value_printer(t);
+            type_map_[std_type_name] = std::move(vi);
+        }
     } 
 
     friend template <typename T> class register_type;
-}
+};
 
 template <typename T>
 class register_type
@@ -761,9 +809,14 @@ public:
     }
 };
 }
+inline std::string atom_name(atom a){ return detail::print_map::instance()->get_type(a); }
+inline std::string atom_value(atom a){ return detail::print_map::instance()->get_value(a); }
 
-inline std::string atom_type_name(atom a){ return detail::print_map::instance()->type(a); }
-inline std::string atom_type_value(atom a){ return detail::print_map::instance()->value(a); }
+// returns a name,value pair
+inline std::pair<std::string,std::string> atom_type_info(atom a)
+{ 
+    return detail::print_map::instance()->get_value_info(a); 
+}
 
 
 namespace detail {
@@ -776,7 +829,10 @@ inline std::string to_string1(atom a)
     if(is_cons(a)){ return to_string(a); }
     else if(is_quoted(a)){ return std::string("'"); }
     else if(is_nil(a)){ return std::string("nil"); }
-    else{ return atom_type_name(a)+":"+atom_type_value(a); }
+    else
+    { 
+        auto ti = atom_type_info(a);
+        return ti.first+":"+ti.second; }
 }
 
 inline std::string to_string(atom a)
@@ -886,6 +942,32 @@ atom foldrl(F&& f, size_t len, atom init, atom a, As... as)
 {
     return foldll(std::forward<F>(f),len,reverse(a),reverse(as)...);
 }
+
+//TODO: implement the following (racket) iterating algorithms:
+/*
+ andmap
+ andmapl
+ ormap
+ ormapl
+ for_each
+ filter
+ remove 
+ remv
+ remp
+ remove_set
+ remsetv
+ remsetp
+ sort
+ member
+ memv
+ memp
+ memf
+ findf
+ assoc
+ assv
+ assp
+ assf
+ */
 
 
 

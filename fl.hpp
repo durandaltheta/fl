@@ -632,13 +632,13 @@ class quote{};
 }
 
 inline atom quote(atom a){ return cons(atom(detail::quote()),a); }
-inline bool is_quoted(atom a){ return is<detail::quote>(a); }
+inline bool is_quote(atom a){ return is<detail::quote>(a); }
 
 inline atom unquote(atom a)
 {
-    if(is_quoted(car(a))
+    if(is_quote(car(a))
     {
-        do{ a = cdr(a); } while(is_quoted(car(a)));
+        do{ a = cdr(a); } while(is_quote(car(a)));
         return a;
     }
     else{ return a; }
@@ -819,20 +819,20 @@ inline std::pair<std::string,std::string> atom_type_info(atom a)
 }
 
 
-namespace detail {
-template <typename STREAM>
 inline std::string to_string(atom a);
 
-template <typename STREAM>
+namespace detail {
 inline std::string to_string1(atom a)
 {
     if(is_cons(a)){ return to_string(a); }
-    else if(is_quoted(a)){ return std::string("'"); }
+    else if(is_quote(a)){ return std::string("'"); }
     else if(is_nil(a)){ return std::string("nil"); }
     else
     { 
         auto ti = atom_type_info(a);
-        return ti.first+":"+ti.second; }
+        return ti.first+":"+ti.second; 
+    }
+}
 }
 
 inline std::string to_string(atom a)
@@ -840,11 +840,11 @@ inline std::string to_string(atom a)
     std::string s;
     if(is_cons(a))
     {
-        if(is_quoted(car(a))){ s+=std::string("'("); }
+        if(is_quote(car(a))){ s+=std::string("'("); }
         else 
         {
             s+=std::string("("); 
-            s+=to_string1(car(a));
+            s+=detail::to_string1(car(a));
         }
 
         a = cdr(a);
@@ -852,14 +852,13 @@ inline std::string to_string(atom a)
         while(!is_nil(a))
         {
             s+=std::string(" "); 
-            s+=to_string1(a);
+            s+=detail::to_string1(a);
             a = cdr(a);
         }
         s+=std::string(")");
     }
-    else{ s+=to_string1(a); }
+    else{ s+=detail::to_string1(a); }
     return s;
-}
 }
 
 

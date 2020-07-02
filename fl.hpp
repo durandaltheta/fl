@@ -3,12 +3,13 @@
 
 // c++
 #include <memory>
-#include <optional>
 #include <any>
 #include <typeinfo>
 #include <type_traits>
 #include <iostream>
 #include <mutex>
+#include <string>
+#include <stringstream>
 
 namespace fl { 
 
@@ -225,123 +226,175 @@ atom eval_curried_function(F&& f, atom a){ return eval_curried_function(f(car(a)
 }
 
 // atomize_function converts any callable to an fl::function
+template <typename R, typename... As>
+function to_fl_function(std::function<R(As)> std_f)
+{
+    function final_f = [=](atom a) -> atom
+    {
+        auto curried_f = curry(std_f);
+        return detail::eval_curried_function(curried_f,a); 
+    };
+    return final_f;
+}
+
 template <typename F>
 function to_fl_function(F&& f)
 {
-    function af = [=](atom a) -> atom
+    function final_f = [=](atom a) -> atom
     {
         auto std_f = to_std_function(std::forward<F>(f));
         auto curried_f = curry(std_f);
         return detail::eval_curried_function(curried_f,a); 
     };
-    return af;
+    return final_f;
 }
 
 
 
 //-----------------------------------------------------------------------------
-// atom 
+// atom  
 
+struct atom;
+
+namespace detail {
 template <typename T> class register_type; 
-#define REGISTER_TYPE__(T) register_type<T>(#T)
+
+typedef bool(*compare_atom_function)(atom,atom)>;
+
+template <>
+bool compare_atom_function__(const atom& a, const atom& b){ return false; }
+
+template <typename T>
+bool compare_atom_function__(const atom& a, const atom& b)
+{
+    // a is guaranteed to be type T
+    if(b.is<T>()){ return a.value<T>() == b.value<T>(): }
+    else{ return false; }
+}
+}
+
+#define REGISTER_TYPE__(T) detail::register_type<T>(#T)
+
 
 struct atom 
 {
-    std::shared_ptr<std::optional<std::any>> a;
+private:
+    struct context 
+    {
+        std::any value;
 
+        // the function pointer stored here knows what the stored type of value 
+        // is, allowing sane/correct comparison
+        detail::compare_atom_function caf;
+
+        context(const context& rhs) : a(rhs.a), caf(rhs.caf) { }
+        context(context&& rhs) : a(std::move(rhs.a)), caf(std::move(rhs.caf)) { }
+
+        template <typename T>
+        context(T&& t, detail::compare_any_function in_caf) : a(t), caf(in_caf) { }
+
+        context& operator=(const context& rhs)
+        {
+            value = rhs.value;
+            caf = rhs.caf;
+            return *this;
+        }
+
+        context& operator=(context&& rhs)
+        {
+            value = std::move(rhs.value);
+            caf = std::move(rhs.caf);
+            return *this;
+        }
+    };
+
+    mutable std::shared_ptr<context> ctx;
+
+    void make_shared_T(T&& t, std::true_type)
+    {
+        auto f = to_fl_function(std::forward<T>(t));
+        ctx = std::make_shared<context>(std::move(f),compare_atom_function__<>);
+    }
+
+    void make_shared_T(T&& t, std::false_type)
+    {
+        ctx = std::make_shared<context>(std::forward<T>(t),compare_any_function__<T>);
+    }
+
+public:
     atom(){}
-    atom(const atom& rhs) : a(rhs.a) {}
-    atom(atom&& rhs) : a(std::move(rhs.a)) {}
+    atom(const atom& rhs) : a(rhs.ctx) {}
+    atom(atom&& rhs) : a(std::move(rhs.ctx)) {}
 
     template <typename T>
     atom(T&& t)
     {
         static REGISTER_TYPE__(T);
-        make_shared_T(std::forward<T>(t),typename std::is_function<T>::type>
+        make_shared_T(std::forward<T>(t), std::is_function<unqualified<T>>>
     }
 
-    void make_shared_T(T&& t, std::true_type)
-    {
-        auto f = to_fl_function(std::forward<T>(t));
-        a = std::make_shared<std::optional<std::any>>(std::move(f));
-    }
+    // compare atom's real typed T values with the == operator 
+    inline bool equalv(const atom& b) const { return caf(*this,b); }
 
-    void make_shared_T(T&& t, std::false_type)
+    // allows direct value comparison such as:
+    // a.equalv(3);
+    // a.equalv("hello world");
+    template <typename T>
+    inline bool equalv(T&& t) const { return caf(*this,atom(std::forward<T>(t))); }
+
+    inline bool equalp(const atom& b) const { return ctx.get() == b.ctx.get() }
+
+    bool is_nil() const { return ctx ? false : true; }
+
+    template <typename T>
+    bool is() const
     {
-        a = std::make_shared<std::optional<std::any>>(std::forward<T>(t));
+        if(is_nil()){ return false; }
+        else
+        {
+            try 
+            {
+                const auto& ref = std::any_cast<const unqualified<T>&>(ctx->a);
+                return true;
+            }
+            catch(...){ return false; }
+        } 
+    };
+
+    // get atom's value as a const reference to the specified type
+    template <typename T> 
+    const unqualified<T>& 
+    value(){ return std::any_cast<const unqualified<T>&>(ctx->a) }
+
+    inline atom copy() const
+    {
+        atom b;
+        *(b.ctx) = *(a.ctx);
+        return b;
     }
 
     // returns true if atom has a value, else false
-    bool operator bool()
-    {
-        // std::shared_ptr and std::optional are valid and std::any has a value
-        if(a && *a && (**a).has_value()){ return true; }
-        else{ return false; }
-    }
+    inline bool operator bool() const { return !is_nil(); }
+    inline bool operator==(const atom& b) const { return equalv(b); }
+    inline bool operator==(atom&& b) const { return equalv(*this,b); }
 };
 
 inline atom nil(){ return atom(); }
-inline bool is_nil(atom a) const { return a ? false : true; }
+inline bool is_nil(atom a){ return a.is_nil(); }
+template <typename T> bool is(atom a){ return a.is<T>(); }
+template <typename T> const T& value(atom a){ return a.value<T>(); }
 
-
-
-//-----------------------------------------------------------------------------
-// type and value
-
-// returns nil if value is not the specified type, else a valid atom
-template <typename T>
-bool is(atom a)
+inline bool equalv(atom lhs, atom rhs){ return lhs.equalv(rhs); }
+template <typename T> bool equalv(atom lhs, T&& rhs){ return equalv(lhs, atom(std::forward<T>(rhs))); }
+template <typename T> bool equalv(T&& lhs, atom rhs){ return equalv(atom(std::forward<T>(lhs),rhs)); }
+template <typename T, typename T2> bool equalv(T&& lhs, T2&& rhs)
 { 
-    atom b(T());
-    if(a && (*(a.a))->type() == (*(b.a))->type()){ return atom(true); }
-    else{ return atom(); }
+    return equalv(atom(std::forward<T>(lhs)),atom(std::forward<T2>(rhs))); 
 }
 
-// get atom's value
-template <typename T>
-const T& value(const atom& a) const { return std::any_cast<const T&>(**(a.a)); }
-
-template <typename T>
-T value(atom&& a) { return std::any_cast<T&&>(**(a.a)); }
-
-
-
-//-----------------------------------------------------------------------------
-// comparison  
-
-// compare atoms, returns true if both atomic values of the specified type are 
-// equal with == operator
-template <typename T>
-bool equalv(atom lhs, atom rhs)
-{
-    return value<T>(lhs) == value<T>(rhs);
-}
-
-// pointer (pointer managed by std::shared_ptr) equality
-inline bool equalp(atom lhs, atom rhs)
-{
-    return lhs.a.get() == rhs.a.get();
-}
-
-
-
-//-----------------------------------------------------------------------------
-// mutable operations 
-
-// can be dangerous to mutate values, this should be generally avoided
-
-// forcibly set value of atom 
-template <typename T>
-atom setv(atom a, T&& t)
-{ 
-    **(a.a) = std::forward<T>(t); 
-    return a;
-}
-
-// return a mutable reference to the value of an atom
-template <typename T>
-T& mutable_value(atom& a) const { return std::any_cast<T&>(**(a.a)); }
-
+inline bool equalp(atom lhs, atom rhs){ return lhs.equalp(rhs); }
+inline atom copy(atom a){ return a.copy(); }
+template <typename T> inline atom copy(T& t){ return atom(std::forward<T>(t)); }
 
 
 //-----------------------------------------------------------------------------
@@ -353,10 +406,11 @@ bool is_cons(atom a) const;
 namespace detail {
 class cons_cell 
 {
-public:
-    atom car;
-    atom cdr;
+private:
+    const atom car;
+    const atom cdr;
 
+public:
     cons_cell(){}
     cons_cell(const atom& a) : car(a) {}
     cons_cell(const atom& a, const atom& b) : car(a), cdr(b) {}
@@ -365,30 +419,13 @@ public:
     cons_cell(const atom& a, atom&& b) : car(a), cdr(std::move(b)) {}
     cons_cell(atom&& a, const atom& b) : car(std::move(a)), cdr(b) {}
 
+    atom car() const { return atom(car); }
+    atom cdr() const { return atom(cdr); }
+
     // returns true if cons_cell is nil, else false
-    bool operator bool(){ return a.car || a.cdr; }
-
-    cons_cell& operator=(const cons_cell& rhs)
-    {
-        car = rhs.car;
-        cdr = rhs.cdr;
-        return *this;
-    }
-
-    cons_cell& operator=(cons_cell&& rhs)
-    {
-        car = std::move(rhs.car);
-        cdr = std::move(rhs.cdr);
-        return *this;
-    }
-
-    bool operator==(const cons_cell& rhs)
-    {
-        return compare(car,rhs.car) && compare(cdr,rhs.cdr);
-    }
-
-    bool operator==(cons_cell&& rhs){ return *this == rhs; }
-};
+    bool operator bool() const { return a.car || a.cdr; }
+    bool operator==(const cons_cell& rhs) const { return equalv(car,rhs.car) && equalv(cdr,rhs.cdr); }
+    bool operator==(cons_cell&& rhs) const { return equalv(car,rhs.car) && equalv(cdr,rhs.cdr); };
 }
 
 template <typename A, typename B>
@@ -398,16 +435,9 @@ inline atom cons(A&& a, B&& b)
                                   atom(std::forward<B>(b)))); 
 }
 
-inline bool is_cons(atom a) const { return is<detail::cons_cell>(a) ? true : false; }
-inline atom car(atom a){ return value<detail::cons_cell>(a).car; }
-inline atom cdr(atom a){ return value<detail::cons_cell>(a).cdr; }
-
-inline atom copy(atom a)
-{ 
-    atom b;
-    *(b.a) = *(a.a.);
-    return b;
-}
+inline bool is_cons(atom a){ return is<detail::cons_cell>(a) ? true : false; }
+inline atom car(atom a){ return value<detail::cons_cell>(a).car(); }
+inline atom cdr(atom a){ return value<detail::cons_cell>(a).cdr(); }
 
 
 
@@ -464,9 +494,20 @@ inline list_info inspect_list(atom a)
 inline bool is_list(atom a){ return inspect_list(a).is_list; }
 inline size_t length(atom a){ return inspect_list(a).length; }
 
-inline atom head(atom lst){ return car(lst); }
-inline atom tail(atom lst)
+// return the cons cell in a list at index position n
+inline atom tail(atom lst, size_t n)
 { 
+    while(n)
+    {
+        --n;
+        lst = cdr(lst);
+    }
+    return lst;
+}
+
+inline atom front(atom lst){ return car(lst); }
+inline atom back(atom lst)
+{
     if(is_nil(lst)){ return lst; }
     else 
     {
@@ -475,15 +516,8 @@ inline atom tail(atom lst)
     }
 }
 
-inline atom nth(atom lst, size_t n)
-{
-    while(n)
-    {
-        --n;
-        lst = cdr(lst);
-    }
-    return car(lst);
-}
+// return the element in a list at index n
+inline atom nth(atom lst, size_t n){ return car(tail(lst,n)); }
 
 inline atom reverse(atom lst)
 {
@@ -607,34 +641,111 @@ inline atom eval(atom a)
 // atom printing 
 
 namespace detail {
-template <typename T>
-using unqualified = typename std::decay<T>::value;
-
-
-template <typename T> 
-class register_type;
 
 class print_map
 {
 public:
     print_map* instance();
+
     inline std::string type(atom a)
     {
         std::unique_lock<std::mutex> lk(mtx_);
-        return map_[a.type().name()];
+        return type_map_[(*(a.a))->type().name()];
+    }
+
+    inline std::string value(atom a)
+    {
+        std::unique_lock<std::mutex> lk(mtx_);
+        std::any& a_ref = **(a.a);
+        return type_map_[(a_ref.type().name()](a_ref);
     }
 
 private:
+    typedef std::function<std::string(std::any&)> value_printer;
     std::mutex mtx_;
-    std::map<std::string,const char*> map_;
+    std::map<std::string,std::string> type_map_;
+    std::map<std::string,value_printer> printer_map_;
+   
+    //integral to_string conversion
+    template <typename T,
+              typename = std::enable_if_t<std::is_integral<T>::value>>
+    void register_value_printer(T& t)
+    {
+        value_printer vp = [](std::any& a) -> std::string 
+        {
+            const auto& v = std::static_cast<const T&>(a);
+            return std::to_string(v);
+        };
+        return vp;
+    }
+   
+    //float to_string conversion
+    template <typename T,
+              typename = std::enable_if_t<std::is_floating_point<T>::value>>
+    void register_value_printer(T& t)
+    {
+        value_printer vp = [](std::any& a) -> std::string 
+        {
+            const auto& v = std::static_cast<const T&>(a);
+            return std::to_string(v);
+        };
+        return vp;
+    }
+
+    //direct string conversion
+    void register_value_printer(const std::string& t)
+    {
+        value_printer vp = [](std::any& a) -> std::string 
+        {
+            const auto& v = std::static_cast<const std::string&>(a);
+            return std::string(v);
+        };
+        return vp;
+    }
+
+    void register_value_printer(const char* t)
+    {
+        value_printer vp = [](std::any& a) -> std::string 
+        {
+            const auto& v = std::static_cast<const char*>(a);
+            return std::string(v);
+        };
+        return vp;
+    }
+
+    void register_value_printer(char* t)
+    {
+        value_printer vp = [](std::any& a) -> std::string 
+        {
+            const auto& v = std::static_cast<char*>(a);
+            return std::string(v);
+        };
+        return vp;
+    }
+
+    // address only
+    template <typename T>
+    void register_value_printer(T& t)
+    {
+        value_printer vp = [](std::any& a) -> std::string 
+        {
+            size_t p = (void*)&(std::any_cast<const T&>(a));
+            std::stringstream ss;
+            ss << std::hex << p;
+            return std::string(ss.str());
+        };
+        return vp;
+    }
 
     template <typename T> 
     void register_type(const char* name)
     { 
-        T t;
+        unqualified<T> t;
         std::any a(t);
         std::unique_lock<std::mutex> lk(mtx_); 
-        map_[a.type().name()] = name;
+        std::string std_type_name = a.type().name():
+        type_map_[std_type_name] = std::string(name);
+        printer_map_[std_type_name] = register_value_printer(t);
     } 
 
     friend template <typename T> class register_type;
@@ -646,12 +757,13 @@ class register_type
 public:
     register_type(const char* name)
     {
-        detail::print_map::instance()->register_type<unqualified<T>>(name);
+        detail::print_map::instance()->register_type<T>(name);
     }
 };
 }
 
-inline const char* atom_type_name(atom a){ return detail::print_map::instance()->type(a); }
+inline std::string atom_type_name(atom a){ return detail::print_map::instance()->type(a); }
+inline std::string atom_type_value(atom a){ return detail::print_map::instance()->value(a); }
 
 
 namespace detail {
@@ -664,7 +776,7 @@ inline std::string to_string1(atom a)
     if(is_cons(a)){ return to_string(a); }
     else if(is_quoted(a)){ return std::string("'"); }
     else if(is_nil(a)){ return std::string("nil"); }
-    else{ return atom_type_name(a); }
+    else{ return atom_type_name(a)+":"+atom_type_value(a); }
 }
 
 inline std::string to_string(atom a)

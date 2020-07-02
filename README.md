@@ -13,8 +13,6 @@ This project is a header only library which enables lisp-like functional program
         - `value`
         - `equalv`
         - `equalp`
-        - `setv`
-        - `mutable_value`
 - lisp-list implementation 
     - `cons_cells` (with car/cdr), acting as a freeform tree-like structure 
     - ability to quote `atom`s to disable evaluation or unquote to re-enable 
@@ -29,6 +27,7 @@ This project is a header only library which enables lisp-like functional program
         - `length`
         - `head`
         - `tail`
+        - `nth`
         - `reverse`
         - `copy_list`
         - `append`

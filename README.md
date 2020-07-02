@@ -24,3 +24,32 @@ This project is a header only library which enables lisp-like functional program
 - ability to convert the data in any forward iterable std:: container into a list of atoms with function `atomize_container`
 - ability to convert a list of atoms into any size constructable std:: container with function `reconstitute_container`
 - ability to iterate over a fl atom `list`s using std:: compatible iterators
+
+
+## Example programs
+``` 
+//hello
+#include <iostream>
+#include "fl.hpp"
+
+int main()
+{
+    fl::atom lst = fl::list("hello"," ","world");
+    auto print = [](const std::string& s){ std::cout << s; };
+    fl::for_each(print, lst);
+    std::cout << std::endl;
+
+    std::cout << fl::to_string(lst) << std::endl;
+
+    fl::atom combined = fl::append(fl::list(print), lst);
+    std::cout << fl::to_string(combined) << std::endl;
+    return 0;
+}
+```
+```
+$ ./hello 
+hello world 
+("hello" " " "world")
+(lambda(const std::string& s):0x0000000000 "hello" " " "world")
+$
+```

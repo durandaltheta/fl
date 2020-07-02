@@ -100,6 +100,53 @@ curry<std::function<void(atom)>>
     {}
 };
 
+// specialization for no argument and no return value
+template <> struct
+curry<std::function<void()>> 
+{
+    using
+    type = std::function<void()>;
+
+    const type
+    result;
+
+    curry(std::function<void()> fun) : 
+    result(
+        [=](atom a){
+            return curry<function>(
+                [=](){
+                    fun();
+                    return atom();
+                }
+            ).result;
+        }
+    ) 
+    {}
+};
+
+// specialization for no argument
+template <typename R> struct
+curry<std::function<R()>> 
+{
+    using
+    type = std::function<R()>;
+
+    const type
+    result;
+
+    curry(std::function<R()> fun) : 
+    result(
+        [=](atom a){
+            return curry<function>(
+                [=](){
+                    return atom(fun());
+                }
+            ).result;
+        }
+    ) 
+    {}
+};
+
 // specialization for non-atom return type
 template <typename R> struct
 curry<std::function<R(atom)>> 
@@ -227,6 +274,16 @@ atom eval_curried_function(F&& f, atom a){ return eval_curried_function(f(car(a)
 }
 
 // atomize_function converts any callable to an fl::function
+template <typename R, typename... As>
+function to_fl_function(std::function<R()> std_f)
+{
+    function final_f = [=](atom a) -> atom
+    {
+        return atom(std_f());
+    };
+    return final_f;
+}
+
 template <typename R, typename... As>
 function to_fl_function(std::function<R(As...)> std_f)
 {
@@ -737,7 +794,7 @@ private:
         value_printer vp = [](std::any& a) -> std::string 
         {
             const auto& v = std::static_cast<const std::string&>(a);
-            return std::string(v);
+            return std::string("\"")+std::string(v)+std::string("\"");
         };
         return vp;
     }
@@ -747,17 +804,7 @@ private:
         value_printer vp = [](std::any& a) -> std::string 
         {
             const auto& v = std::static_cast<const char*>(a);
-            return std::string(v);
-        };
-        return vp;
-    }
-
-    value_printer make_value_printer(char* t)
-    {
-        value_printer vp = [](std::any& a) -> std::string 
-        {
-            const auto& v = std::static_cast<char*>(a);
-            return std::string(v);
+            return std::string("\"")+std::string(v)+std::string("\"");
         };
         return vp;
     }

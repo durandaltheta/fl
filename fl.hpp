@@ -9,10 +9,13 @@
 #include <iostream>
 #include <ostream>
 #include <mutex>
+#include <condition_variable>
 #include <string>
 #include <stringstream>
 #include <unordered_map>
+#include <vector>
 #include <exception>
+#include <thread>
 
 namespace fl { 
 
@@ -1209,5 +1212,327 @@ iterator end(fl::atom a){ return iterator(); }
 iterator cbegin(fl::atom a){ return const_iterator(fl::value<fl::detail::cons_cell>(a).car); }
 iterator cend(fl::atom a){ return const_iterator(); }
 }
+
+
+
+//-----------------------------------------------------------------------------
+// channel 
+
+// channel is an interface (via std::shared_ptr) to an internal mechanism for 
+// sending atoms to a threadsafe circular queue.
+namespace fl {
+class channel
+{
+public:
+    inline channel(){}
+    inline channel(const channel& rhs) : ctx(rhs.ctx) {}
+    inline channel(channel&& rhs) : ctx(std::move(rhs.ctx)) {}
+
+    inline channel& operator=(const channel& rhs)
+    {
+        ctx = rhs.ctx;
+        return *this;
+    }
+
+    inline channel& operator=(channel&& rhs)
+    {
+        ctx = std::move(rhs.ctx);
+        return *this;
+    }
+
+    inline void make(size_t cap=1)
+    {
+        ctx = std::make_shared<channel_context>(cap);
+    }
+
+    inline void close(){ return ctx->close(); }
+    inline bool closed(){ return ctx->closed(); }
+    inline size_t size(){ return ctx->size(); }
+    inline size_t capacity(){ return ctx->capacity(); }
+    inline bool send(atom a){ return ctx->send(a); }
+    inline bool recv(atom& a){ return ctx->recv(a); }
+
+private:
+    struct channel_context 
+    {
+        std::mutex mtx;
+        std::condition_variable non_full_cv;
+        std::condition_variable non_empty_cv;
+        std::vector<atom> buf;
+        const size_t cap;
+        size_t head;
+        size_t tail;
+        size_t sz;
+        bool closed;
+
+        inline channel_context(size_t in_cap) : 
+            cap(in_cap),
+            head(0),
+            tail(0),
+            sz(0),
+            closed(false)
+        {
+            if(!cap){ cap=1; }
+            buf.reserve(cap);
+        }
+
+        inline void close()
+        {
+            std::unique_lock<std::mutex> lk(mtx);
+            closed=true;
+            non_full_cv.notify_all();
+            non_empty_cv.notify_all();
+        }
+
+        inline bool closed()
+        {
+            std::unique_lock<std::mutex> lk(mtx);
+            return closed;
+        }
+
+        inline size_t size()
+        {
+            std::unique_lock<std::mutex> lk(mtx);
+            return sz;
+        }
+
+        inline size_t capacity()
+        {
+            std::unique_lock<std::mutex> lk(mtx);
+            return cap;
+        }
+
+        inline bool send(atom a)
+        {
+            atom ca = copy(a);
+            std::unique_lock<std::mutex> lk(mtx);
+            while(!closed && sz >= cap){ non_full_cv.wait(lk); }
+            if(closed){ return false; }
+            else 
+            {
+                buf[head] = ca;
+                inc(head);
+                ++sz;
+                non_empty_cv.notify_one();
+                return true;
+            }
+        }
+
+        inline bool recv(atom& a)
+        {
+            std::unique_lock<std::mutex> lk(mtx);
+            while(!closed && sz >= cap){ non_empty_cv.wait(lk); }
+            if(closed){ return false; }
+            else 
+            {
+                a = buf[tail];
+                inc(tail);
+                --sz;
+                non_full_cv.notify_one();
+                return true;
+            }
+        }
+
+        inline void inc(size_t& i)
+        {
+            if(i+1 == cap){ i=0; }
+            else{ ++i; }
+        }
+    };
+
+    std::shared_ptr<channel_context> ctx;
+};
+
+channel make_channel()
+{ 
+    channel c;
+    c.make();
+    return c;
+}
+
+
+
+//-----------------------------------------------------------------------------
+// thread worker
+
+// worker is an interface to an std::thread stored in a std::shared_ptr.
+//
+// The std::thread will continually call its function f on atoms received from 
+// the channel it was constructed with. This will continue until the worker's 
+// context std::shared_ptr goes out of scope, upon which eval()s will cease, the 
+// worker function will return and the thread joined.
+class worker 
+{
+public:
+    inline worker(function f, channel in){ if(!ctx){ ctx = std::make_shared<worker_context>(c); } }
+    inline worker(const worker& rhs) : ctx(rhs.ctx) { }
+    inline worker(worker&& rhs) : ctx(std::move(rhs.ctx)) { }
+
+    inline worker& operator=(const worker& rhs)
+    {
+        ctx = rhs.ctx;
+        return *this;
+    }
+
+    inline worker& operator=(worker&& rhs)
+    {
+        ctx = std::move(rhs.ctx);
+        return *this;
+    }
+
+    inline channel task_channel(){ return ctx->task_channel(); }
+
+private:
+    struct worker_context 
+    {
+    public:
+        inline worker_context(channel in)
+        {
+            function f = [](atom a){ return eval(a); }
+            start(f,in);
+        }
+
+        inline worker_context(function f, channel in)
+        {
+            ch = in;
+            run = std::make_shared<bool>(false);
+            done = std::make_shared<bool>(false);
+            thd = std::thread([&](function f)
+            {
+                bool recv_success=false;
+                std::unique_lock<std::mutex> lk(mtx);
+                *run=true;
+                ready_cv.notify_one();
+                atom a;
+                while(*run)
+                {
+                    lk.unlock();
+                    success = ch.recv(a);
+                    if(success)
+                    { 
+                        f(a); 
+                        lk.lock();
+                    }
+                    else 
+                    {
+                        lk.lock();
+                        *run=false; // shutdown if channel is closed
+                    }
+                }
+                *done=true;
+                done_cv.notify_one();
+            }, f);
+
+            std::unique_lock<std::mutex> lk(mtx);
+            while(!*run){ ready_cv.wait(lk); }
+        }
+
+        inline channel task_channel(){ return ch; }
+
+        inline ~worker_context()
+        {
+            {
+                std::unique_lock<std::mutex> lk(mtx);
+                *run = false;
+                ch.close();
+                while(!*done){ done_cv.wait(lk); }
+            }
+            thd.join();
+        }
+
+    private:
+        std::mutex mtx;
+        std::condition_variable ready_cv;
+        std::condition_variable done_cv;
+        std::thread thd;
+        std::shared_ptr<bool> run;
+        std::shared_ptr<bool> done;
+        channel ch;
+    };
+
+    std::shared_ptr<worker_context> ctx;
+};
+
+
+
+//-----------------------------------------------------------------------------
+// threadpool
+
+class threadpool 
+{
+public:
+    inline threadpool(){}
+    inline threadpool(const threadpool& rhs) : ctx(rhs.ctx) { }
+    inline threadpool(threadpool&& rhs) : ctx(std::move(rhs.ctx)) { }
+
+    inline threadpool& operator=(const threadpool& rhs)
+    {
+        ctx = rhs.ctx;
+        return *this;
+    }
+
+    inline threadpool& operator=(threadpool&& rhs)
+    {
+        ctx = std::move(rhs.ctx);
+        return *this;
+    }
+
+    inline void start(size_t channel_size, 
+                      size_t worker_count=std::thread::hardware_concurrency())
+    {
+        ctx = std::make_shared<threadpool_context>(channel_size, worker_count);
+    }
+
+    // channel to pass atoms to workers. If said atom is a list beginning with 
+    // an fl::function said atom will be evaluated.
+    inline channel task_channel(){ return ctx->task_channel(); }
+
+private:
+    struct threadpool_context 
+    {
+    public:
+        threadpool_context(size_t worker_count, size_t channel_size) 
+        { 
+            if(!worker_count){ worker_count=1; }
+            if(!channel_size){ channel_size=1; }
+
+            function f = [](atom a){ return eval(a); };
+
+            workers.reserve(worker_count);
+            for(size_t i=0; i<worker_count; ++i)
+            { 
+                workers.emplace_back(f,make_channel(channel_size));
+            }
+
+            cur = workers.begin();
+            end = workers.end();
+
+            function f = [&](atom a)
+            {
+                cur->task_channel().send(a);
+                if(cur==end){ cur = workers.begin(); }
+                else{ ++cur; }
+                return nil();
+            }
+
+            // distribution_worker is responsible for evenly scheduling atoms 
+            // between all the workers
+            ch.make(channel_size);
+            distribution_worker = std::make_shared<worker>(f,ch);
+        }
+
+        channel task_channel(){ return ch; }
+
+    private:
+        channel ch;
+        std::shared_ptr<worker> distribution_worker;
+        std::vector<worker> workers;
+        std::vector<worker>::iterator cur;
+        std::vector<worker>::iterator end;
+    };
+
+    std::shared_ptr<threadpool_context> ctx;
+};
+} // end fl
 
 #endif

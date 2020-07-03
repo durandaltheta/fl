@@ -1219,7 +1219,16 @@ iterator cend(fl::atom a){ return const_iterator(); }
 // channel 
 
 // channel is an interface (via std::shared_ptr) to an internal mechanism for 
-// sending atoms to a threadsafe circular queue.
+// sending atoms to a threadsafe circular queue. 
+//
+// It is *VERY IMPORTANT* that the user consider passing a deep copy 
+// (using copy(), copy_list(), or whatever function is relevant) of whatever 
+// atom or atomic structure you want to send, otherwise you risk both race 
+// conditions and random data invalidation if the underlying context is ever 
+// modified with set(). Example (given atom a):
+//
+// atom b = copy_list(a);
+// ch.send(b);
 namespace fl {
 class channel
 {
@@ -1304,7 +1313,6 @@ private:
 
         inline bool send(atom a)
         {
-            atom ca = copy(a);
             std::unique_lock<std::mutex> lk(mtx);
             while(!closed && sz >= cap){ non_full_cv.wait(lk); }
             if(closed){ return false; }

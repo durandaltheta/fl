@@ -1359,7 +1359,7 @@ channel make_channel()
 //
 // The std::thread will continually call its function f on atoms received from 
 // the channel it was constructed with. This will continue until the worker's 
-// context std::shared_ptr goes out of scope, upon which calls to fwill cease, 
+// context std::shared_ptr goes out of scope, upon which calls to f will cease, 
 // the worker function will return and the thread joined.
 class worker 
 {

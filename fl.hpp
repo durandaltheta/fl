@@ -14,6 +14,7 @@
 #include <stringstream>
 #include <unordered_map>
 #include <vector>
+#include <list>
 #include <exception>
 #include <thread>
 
@@ -273,7 +274,11 @@ atom eval_curried_function(function&& f, atom a){ return f(a); }
 
 // recursive variation
 template <typename F>
-atom eval_curried_function(F&& f, atom a){ return eval_curried_function(f(car(a)),cdr(a)); }
+atom eval_curried_function(F&& f, atom a)
+{ 
+    if(is_nil(a)){ return eval_curried_function(f(a),a); }
+    else{ return eval_curried_function(f(car(a)),cdr(a)); }
+}
 }
 
 // atomize_function converts any callable to an fl::function
@@ -730,7 +735,7 @@ namespace detail {
 class print_map
 {
 public:
-    print_map* instance();
+    print_map& instance();
     
     inline std::pair<std::string,std::string> get_value_info(atom a)
     {
@@ -748,7 +753,7 @@ public:
     inline std::string get_value(atom a)
     {
         std::unique_lock<std::mutex> lk(mtx_);
-        return type_map_[(get_std_type_name(a)].pr(a_ref);
+        return type_map_[get_std_type_name(a)].pr(a_ref);
     }
 
 private:
@@ -1219,16 +1224,24 @@ iterator cend(fl::atom a){ return const_iterator(); }
 // channel 
 
 // channel is an interface (via std::shared_ptr) to an internal mechanism for 
-// sending atoms to a threadsafe circular queue. 
+// sending atoms and retrieving atoms from a threadsafe queue. 
 //
 // It is *VERY IMPORTANT* that the user consider passing a deep copy 
 // (using copy(), copy_list(), or whatever function is relevant) of whatever 
 // atom or atomic structure you want to send, otherwise you risk both race 
 // conditions and random data invalidation if the underlying context is ever 
-// modified with set(). Example (given atom a):
+// modified with set(). 
+//
+// However, you don't have to make a copy if the given atom is never used again.
+// A common example of this is when a local atom is created (explictly or 
+// implicitly) from other not-atom local variables for use in sending through a 
+// channel.
+//
+// Example (given atom a):
 //
 // atom b = copy_list(a);
-// ch.send(b);
+// ch.send(b); 
+
 namespace fl {
 class channel
 {
@@ -1249,47 +1262,37 @@ public:
         return *this;
     }
 
-    inline void make(size_t cap=1)
-    {
-        ctx = std::make_shared<channel_context>(cap);
-    }
+    bool operator bool(){ return ctx ? true : false; }
 
+    inline void make(){ ctx = std::make_shared<channel_context>(); }
     inline void close(){ return ctx->close(); }
     inline bool closed(){ return ctx->closed(); }
     inline size_t size(){ return ctx->size(); }
-    inline size_t capacity(){ return ctx->capacity(); }
     inline bool send(atom a){ return ctx->send(a); }
     inline bool recv(atom& a){ return ctx->recv(a); }
+
+    template <typename T>
+    inline bool send(T&& t){ return ctx->send(atom(std::forward<T>(t))); }
+
+    template <typename T>
+    inline bool recv(T& t)
+    { 
+        atom a;
+        bool success = ctx->recv(a); 
+        t = value<T>(a);
+        return success;
+    }
 
 private:
     struct channel_context 
     {
-        std::mutex mtx;
-        std::condition_variable non_full_cv;
-        std::condition_variable non_empty_cv;
-        std::vector<atom> buf;
-        const size_t cap;
-        size_t head;
-        size_t tail;
-        size_t sz;
-        bool closed;
-
-        inline channel_context(size_t in_cap) : 
-            cap(in_cap),
-            head(0),
-            tail(0),
-            sz(0),
-            closed(false)
-        {
-            if(!cap){ cap=1; }
-            buf.reserve(cap);
-        }
+    public:
+        inline channel_context() : closed(false) {}
 
         inline void close()
         {
             std::unique_lock<std::mutex> lk(mtx);
             closed=true;
-            non_full_cv.notify_all();
             non_empty_cv.notify_all();
         }
 
@@ -1302,66 +1305,57 @@ private:
         inline size_t size()
         {
             std::unique_lock<std::mutex> lk(mtx);
-            return sz;
-        }
-
-        inline size_t capacity()
-        {
-            std::unique_lock<std::mutex> lk(mtx);
-            return cap;
+            return lst.size();
         }
 
         inline bool send(atom a)
         {
             std::unique_lock<std::mutex> lk(mtx);
-            while(!closed && sz >= cap){ non_full_cv.wait(lk); }
-            if(closed){ return false; }
-            else 
+            if(!closed)
             {
-                buf[head] = ca;
-                inc(head);
-                ++sz;
+                lst.push_back(a);
                 non_empty_cv.notify_one();
                 return true;
             }
+            else{ return false; }
         }
 
         inline bool recv(atom& a)
         {
             std::unique_lock<std::mutex> lk(mtx);
-            while(!closed && sz >= cap){ non_empty_cv.wait(lk); }
-            if(closed){ return false; }
-            else 
+            while(!closed && lst.size()){ non_empty_cv.wait(lk); }
+            if(!closed)
             {
-                a = buf[tail];
-                inc(tail);
-                --sz;
-                non_full_cv.notify_one();
+                a = lst.front();
+                lst.pop_front();
                 return true;
             }
+            else{ return false; }
         }
 
-        inline void inc(size_t& i)
-        {
-            if(i+1 == cap){ i=0; }
-            else{ ++i; }
-        }
+    private:
+        std::mutex mtx;
+        std::condition_variable non_empty_cv;
+        std::list<atom> lst;
+        bool closed;
     };
 
     std::shared_ptr<channel_context> ctx;
 };
 
-channel make_channel()
+channel make_channel(size_t capacity=1)
 { 
     channel c;
-    c.make();
+    c.make(capacity);
     return c;
 }
 
 
 
 //-----------------------------------------------------------------------------
-// thread worker
+// thread worker 
+
+class threadpool;
 
 // worker is an interface to an std::thread stored in a std::shared_ptr.
 //
@@ -1390,23 +1384,26 @@ public:
 
     inline channel task_channel(){ return ctx->task_channel(); }
 
+    bool operator bool(){ return ctx ? true : false; }
+
 private:
     struct worker_context 
     {
     public:
-        inline worker_context(channel in)
+        inline worker_context(channel in) : parent_tp(nullptr)
         {
             function f = [](atom a){ return eval(a); }
             start(f,in);
         }
 
-        inline worker_context(function f, channel in)
+        inline worker_context(function f, channel in) : parent_tp(nullptr)
         {
             ch = in;
             run = std::make_shared<bool>(false);
             done = std::make_shared<bool>(false);
             thd = std::thread([&](function f)
             {
+                set_current_worker(this);
                 bool recv_success=false;
                 std::unique_lock<std::mutex> lk(mtx);
                 *run=true;
@@ -1436,6 +1433,14 @@ private:
         }
 
         inline channel task_channel(){ return ch; }
+        inline channel threadpool_task_channel()
+        { 
+            if(parent_tp)
+            {
+                return parent_tp->task_channel();
+            }
+            else{ return channel(); }
+        }
 
         inline ~worker_context()
         {
@@ -1456,9 +1461,12 @@ private:
         std::shared_ptr<bool> run;
         std::shared_ptr<bool> done;
         channel ch;
+        threadpool* parent_tp;
+        friend class threadpool;
     };
 
     std::shared_ptr<worker_context> ctx;
+    friend class threadpool;
 };
 
 
@@ -1485,37 +1493,43 @@ public:
         return *this;
     }
 
-    inline void start(size_t channel_size, 
-                      size_t worker_count=std::thread::hardware_concurrency())
+    bool operator bool(){ return ctx ? true : false; }
+
+    threadpool& current_threadpool();
+
+    inline void start(size_t worker_count=std::thread::hardware_concurrency())
     {
-        ctx = std::make_shared<threadpool_context>(channel_size, worker_count);
+        ctx = std::make_shared<threadpool_context>(this, worker_count);
     }
 
     // channel to pass atoms to workers. If said atom is a list beginning with 
     // an fl::function said atom will be evaluated.
     inline channel task_channel(){ return ctx->task_channel(); }
+    inline size_t worker_count(){ return ctx->worker_count(); }
+    inline worker get_worker(size_t idx){ return ctx->get_worker(idx); }
 
 private:
     struct threadpool_context 
     {
     public:
-        threadpool_context(size_t worker_count, size_t channel_size) 
+        inline threadpool_context(threadpool* parent_tp, 
+                                  size_t worker_count)
         { 
             if(!worker_count){ worker_count=1; }
-            if(!channel_size){ channel_size=1; }
 
             function f = [](atom a){ return eval(a); };
 
             workers.reserve(worker_count);
             for(size_t i=0; i<worker_count; ++i)
             { 
-                workers.emplace_back(f,make_channel(channel_size));
+                workers.emplace_back(f,make_channel());
+                workers.back().ctx->parent_tp = this;
             }
 
             cur = workers.begin();
             end = workers.end();
 
-            function f = [&](atom a)
+            function distf = [&](atom a)
             {
                 cur->task_channel().send(a);
                 if(cur==end){ cur = workers.begin(); }
@@ -1525,11 +1539,14 @@ private:
 
             // distribution_worker is responsible for evenly scheduling atoms 
             // between all the workers
-            ch.make(channel_size);
-            distribution_worker = std::make_shared<worker>(f,ch);
+            ch.make();
+            distribution_worker = std::make_shared<worker>(distf,ch);
+            distribution_worker->ctx->parent_tp = this;
         }
 
-        channel task_channel(){ return ch; }
+        inline channel task_channel(){ return ch; }
+        inline size_t worker_count(){ return workers.size(); }
+        inline worker get_worker(size_t idx){ return workers[idx]; }
 
     private:
         channel ch;
@@ -1537,10 +1554,109 @@ private:
         std::vector<worker> workers;
         std::vector<worker>::iterator cur;
         std::vector<worker>::iterator end;
+        threadpool* parent_tp;
+        threadpool* previous_tp;
     };
 
     std::shared_ptr<threadpool_context> ctx;
 };
+
+
+
+//-----------------------------------------------------------------------------
+// continuation 
+//
+// A continuation is just syntactic sugar for passing the result of eval()ing 
+// an atom to a channel.
+//
+// The real trick is realizing that the returned value can be a list of a 
+// function and arguments, and the target channel can be be a threadpool or 
+// worker. In short, you can continually reschedule an operation in a fashion 
+// similar to coroutines which can achieve single (or multi) threaded 
+// concurrency.
+//
+// Example:
+/*
+#include <fl/fl.hpp>
+
+// Classical recursive fibonacci calculator
+int recursive_fib(int x)
+{
+    if((x==1)||(x==0)){ return(x); }
+    else{ return(fib(x-1)+fib(x-2)); }
+}
+
+// Multithreaded coroutine-like continuation based fibonacci calculator. Is it 
+// efficient? Of course not. Is it fast? No. Is it a working example? You bet.
+int continuation_fib(threadpool tp, int x)
+{
+    channel return_ch = make_channel(1);
+
+    auto schedule = [=](atom a){ fl::current_worker->threadpool_task_channel().send(a); };
+
+    auto fib = [=](int x, channel return_ch)
+    {
+        fl::channel tp_task_ch = fl::current_worker->threadpool_task_channel();
+
+        if((x==1)||(x==0)){ return_ch.send(x); }
+        else
+        { 
+            auto fib_cont1 = [=](int x)
+            {
+                channel cont_ch1 = make_channel(1);
+
+                auto fib_cont2 = [=](int x)
+                {
+                    atom r1;
+                    cont_ch1.recv(r1);
+                    channel cont_ch2 = make_channel(1);
+
+                    auto final_ret = [=](int r1)
+                    {
+                        atom r2;
+                        cont_ch2.recv(r2);
+                        return_ch.send(r1+r2);
+                    };
+
+                    schedule(fl::atom([]
+                    { 
+                        fib(x-2, cont_ch2);
+                        tp_task_ch.send(fl::list(final_ret, r1)); 
+                    })); 
+                };
+
+                schedule(fl::atom([]
+                { 
+                    fib(x-1,cont_ch1);
+                    tp_task_ch.send(fl::list(fib_cont2, x)); 
+                })); 
+            };
+
+            schedule(fl::atom([]{ tp_task_ch.send(fl::list(fib_con1, x)); })); 
+        }
+    };
+
+    tp.task_channel().send(fl::list(fib,x,return_ch));
+
+    int ret=0;
+    return_ch.recv(ret);
+    return ret;
+}
+
+
+int main()
+{
+    fl::threadpool tp;
+    tp.start(); 
+
+    for(int i=0; i<9; ++i){ std::cout << recursive_fib(i) << " "; }
+    std::cout << recursive_fib(10) << std::endl;
+
+    for(int i=0; i<9; ++i){ std::cout << continuation_fib(tp,i) << " "; }
+    std::cout << continuation_fib(tp,10) << std::endl; 
+}
+ */
+
 } // end fl
 
 #endif

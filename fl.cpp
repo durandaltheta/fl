@@ -6,37 +6,40 @@ fl::print_map& fl::instance()
     return pm;
 }
 
-thread_local worker* g_current_worker=nullptr;
+thread_local worker_context* g_current_worker=nullptr;
 
-bool fl::in_worker(){ return g_current_worker ? true : false; }
-fl::worker& fl::current_worker(){ return *g_current_worker; }
+fl::worker* fl::worker_context::get_current_worker(){ return g_current_worker; }
+void fl::worker_context::set_current_worker(worker* w){ g_current_worker = w; }
 
-bool fl::in_threadpool()
-{ 
-    return in_worker() && current_worker().in_threadpool() ? true : false;
+bool in_worker(){ return g_current_worker ? true : false; }
+fl::worker current_worker(){ return *g_current_worker; }
+
+bool in_workerpool(){ return in_worker() && current_worker().in_workerpool(); }
+fl::workerpool current_workerpool(){ return current_worker().get_workerpool(); }
+
+std::mutex g_default_workerpool_mtx;
+workerpool g_default_workerpool;
+size_t g_default_workerpool_worker_count=0;
+
+void set_default_workerpool_worker_count(size_t cnt)
+{
+    std::unique_lock<std::mutex> lk(mtx);
+    g_default_workerpool_worker_count = cnt;
 }
 
-fl::threadpool& fl::current_threadpool()
+fl::workerpool default_workerpool()
 { 
-    return current_worker().threadpool();
-}
-
-void fl::worker_context::set_current_worker(worker* w)
-{ 
-    g_current_worker = w; 
-}
-
-thread_local threadpool g_default_threadpool;
-
-fl::threadpool& fl::default_threadpool()
-{ 
-    if(!g_default_threadpool){ g_default_threadpool.start(); }
-    return g_default_threadpool;
+    if(!g_default_workerpool)
+    { 
+        if(g_default_workerpool_worker_count){ g_default_workerpool.start(cnt); }
+        else{ g_default_workerpool.start(); }
+    }
+    return g_default_workerpool;
 }
 
 atom fl::schedule(atom a)
 {
-    if(in_threadpool()){ return current_threadpool().schedule(a); }
+    if(in_workerpool()){ return current_workerpool().schedule(a); }
     else if(in_worker()){ return current_worker().schedule(a); }
-    else{ return default_threadpool().schedule(a); }
+    else{ return default_workerpool().schedule(a); }
 }

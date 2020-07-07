@@ -1371,9 +1371,9 @@ channel make_channel(size_t capacity=1)
 //-----------------------------------------------------------------------------
 // thread worker 
 
-class threadpool;
+class workerpool;
 
-// worker is an interface to an std::thread stored in a std::shared_ptr.
+// worker is an interface to an std::thread stored in an std::shared_ptr.
 //
 // The std::thread will continually call its function f on atoms received from 
 // the channel it was constructed with. This will continue until the worker's 
@@ -1382,7 +1382,7 @@ class threadpool;
 class worker 
 {
 public:
-    inline worker(function f, channel in){ if(!ctx){ ctx = std::make_shared<worker_context>(c); } }
+    inline worker(function f, channel in){ if(!ctx){ ctx = std::make_shared<worker_context>(this,f,c); } }
     inline worker(const worker& rhs) : ctx(rhs.ctx) { }
     inline worker(worker&& rhs) : ctx(std::move(rhs.ctx)) { }
 
@@ -1398,49 +1398,63 @@ public:
         return *this;
     }
 
-    inline channel task_channel(){ return ctx->task_channel(); }
-
     bool operator bool(){ return ctx ? true : false; }
+
+    inline void schedule(atom a){ return ctx->schedule(a); }
+
+    template <typename F, typename... Ts>
+    void schedule(F&& f, Ts&&... ts)
+    {
+        return schedule(list(std::forward<F>(f),std::forward<Ts>(ts)...));
+    }
+
+    inline bool halt(){ ctx->halt(); }
 
 private:
     struct worker_context 
     {
     public:
-        inline worker_context(channel in) : parent_tp(nullptr)
-        {
-            function f = [](atom a){ return eval(a); }
-            start(f,in);
-        }
-
-        inline worker_context(function f, channel in) : parent_tp(nullptr)
+        inline worker_context(worker* parent_w, function f, channel in) : parent_tp(nullptr)
         {
             ch = in;
             run = std::make_shared<bool>(false);
             done = std::make_shared<bool>(false);
             thd = std::thread([&](function f)
             {
-                set_current_worker(this);
-                bool recv_success=false;
-                std::unique_lock<std::mutex> lk(mtx);
-                *run=true;
-                ready_cv.notify_one();
-                atom a;
-                while(*run)
+                worker_context* parent_worker = get_current_worker();
+                set_current_worker(parent_w);
+                try 
                 {
-                    lk.unlock();
-                    success = ch.recv(a);
-                    if(success)
-                    { 
-                        f(a); 
-                        lk.lock();
-                    }
-                    else 
+                    bool recv_success=false;
+                    std::unique_lock<std::mutex> lk(mtx);
+                    *run=true;
+                    ready_cv.notify_one();
+                    atom a;
+                    while(*run)
                     {
-                        lk.lock();
-                        *run=false; // shutdown if channel is closed
+                        lk.unlock();
+                        recv_success = ch.recv(a);
+                        if(recv_success)
+                        { 
+                            f(a); 
+                            lk.lock();
+                        }
+                        else 
+                        {
+                            lk.lock();
+                            *run=false; // shutdown if channel is closed
+                        }
                     }
                 }
+                catch(...)
+                {
+                    *done=true;
+                    set_current_worker(parent_worker);
+                    done_cv.notify_one();
+                    std::rethrow_exception(std::current_exception());
+                }
                 *done=true;
+                set_current_worker(parent_worker);
                 done_cv.notify_one();
             }, f);
 
@@ -1448,26 +1462,27 @@ private:
             while(!*run){ ready_cv.wait(lk); }
         }
 
-        inline channel task_channel(){ return ch; }
-        inline channel threadpool_task_channel()
-        { 
-            if(parent_tp)
-            {
-                return parent_tp->task_channel();
-            }
-            else{ return channel(); }
-        }
+        worker* get_current_worker();
+        void set_current_worker(worker* w);
 
-        inline ~worker_context()
-        {
+        inline void schedule(atom a){ return ch.send(a); }
+        inline void halt()
+        { 
+            std::unique_lock<std::mutex> lk(mtx);
+            if(thd.joinable())
             {
-                std::unique_lock<std::mutex> lk(mtx);
                 *run = false;
                 ch.close();
                 while(!*done){ done_cv.wait(lk); }
+                lk.unlock();
+                thd.join();
             }
-            thd.join();
         }
+
+        inline bool in_workerpool(){ return parent_tp ? true : false; }
+        inline workerpool* get_workerpool(){ return *parent_tp; }
+
+        inline ~worker_context(){ halt(); }
 
     private:
         std::mutex mtx;
@@ -1477,36 +1492,52 @@ private:
         std::shared_ptr<bool> run;
         std::shared_ptr<bool> done;
         channel ch;
-        threadpool* parent_tp;
-        friend class threadpool;
+        workerpool* parent_tp;
+        friend class workerpool;
     };
 
     std::shared_ptr<worker_context> ctx;
-    friend class threadpool;
+    friend class workerpool;
 };
 
 bool in_worker();
-worker& current_worker();
+
+// Keeping a copy of a worker (for instance, in an atom) can cause the worker to 
+// never go out of scope, causing a memory leak. Try to always use this function 
+// inline instead of caching it. 
+//
+// An exception to this is when the lifetime of the copy is temporary, such as 
+// when creating a worker to execute an io call, whereupon a cached 
+// current_worker() value is used to re-schedule the continuation.
+worker current_worker();
 
 
 
 //-----------------------------------------------------------------------------
-// threadpool
+// workerpool
+//
+// workerpool is an interface class to a shared_ptr context of managed worker 
+// objects. A workerpool will create N count of workers when its start() 
+// function is called, and will schedule atoms for evaluation to said workers 
+// when its schedule() function is called.
+//
+// All workers will be halt()ed when the last workerpool to the shared context 
+// goes out of scope.
 
-class threadpool 
+class workerpool 
 {
 public:
-    inline threadpool(){}
-    inline threadpool(const threadpool& rhs) : ctx(rhs.ctx) { }
-    inline threadpool(threadpool&& rhs) : ctx(std::move(rhs.ctx)) { }
+    inline workerpool(){}
+    inline workerpool(const workerpool& rhs) : ctx(rhs.ctx) { }
+    inline workerpool(workerpool&& rhs) : ctx(std::move(rhs.ctx)) { }
 
-    inline threadpool& operator=(const threadpool& rhs)
+    inline workerpool& operator=(const workerpool& rhs)
     {
         ctx = rhs.ctx;
         return *this;
     }
 
-    inline threadpool& operator=(threadpool&& rhs)
+    inline workerpool& operator=(workerpool&& rhs)
     {
         ctx = std::move(rhs.ctx);
         return *this;
@@ -1516,77 +1547,98 @@ public:
 
     inline void start(size_t worker_count=std::thread::hardware_concurrency())
     {
-        ctx = std::make_shared<threadpool_context>(this, worker_count);
+        ctx = std::make_shared<workerpool_context>(this, worker_count);
     }
 
-    // channel to pass atoms to workers. If said atom is a list beginning with 
-    // an fl::function said atom will be evaluated.
-    inline channel task_channel(){ return ctx->task_channel(); }
     inline size_t worker_count(){ return ctx->worker_count(); }
-    inline worker get_worker(size_t idx){ return ctx->get_worker(idx); }
+
+    inline void schedule(atom a){ return ctx->schedule(a); }
+
+    template <typename F, typename... Ts>
+    void schedule(F&& f, Ts&&... ts)
+    {
+        return schedule(list(std::forward<F>(f),std::forward<Ts>(ts)...));
+    }
 
 private:
-    struct threadpool_context 
+    struct workerpool_context 
     {
     public:
-        inline threadpool_context(threadpool* parent_tp, 
-                                  size_t worker_count)
+        inline workerpool_context(workerpool* parent_tp, 
+                                  size_t worker_count) :
+            ch(make_channel())
         { 
             if(!worker_count){ worker_count=1; }
-
-            function f = [](atom a){ return eval(a); };
 
             workers.reserve(worker_count);
             for(size_t i=0; i<worker_count; ++i)
             { 
-                workers.emplace_back(f,make_channel());
+                workers.emplace_back(eval,make_channel());
                 workers.back().ctx->parent_tp = this;
             }
 
             cur = workers.begin();
             end = workers.end();
-
-            function distf = [&](atom a)
-            {
-                cur->task_channel().send(a);
-                if(cur==end){ cur = workers.begin(); }
-                else{ ++cur; }
-                return nil();
-            }
-
-            // distribution_worker is responsible for evenly scheduling atoms 
-            // between all the workers
-            ch.make();
-            distribution_worker = std::make_shared<worker>(distf,ch);
-            distribution_worker->ctx->parent_tp = this;
         }
 
-        inline channel task_channel(){ return ch; }
-        inline size_t worker_count(){ return workers.size(); }
-        inline worker get_worker(size_t idx){ return workers[idx]; }
+        inline void schedule(atom a)
+        {
+            std::unique_lock<std::mutex> lk(mtx);
+            cur->schedule(a);
+            // rotate which worker to schedule on next
+            if(cur==end){ cur = workers.begin(); }
+            else{ ++cur; }
+            return nil();
+        }
+
+        inline size_t worker_count()
+        { 
+            std::unique_lock<std::mutex> lk(mtx);
+            return workers.size(); 
+        }
+
+        ~workerpool_context()
+        {
+            for(auto cur = workers.begin(); cur!=workers.end(); ++cur)
+            {
+                cur->halt();
+            }
+        }
 
     private:
+        std::mutex mtx;
         channel ch;
-        std::shared_ptr<worker> distribution_worker;
         std::vector<worker> workers;
         std::vector<worker>::iterator cur;
         std::vector<worker>::iterator end;
-        threadpool* parent_tp;
-        threadpool* previous_tp;
+        workerpool* parent_tp;
+        workerpool* previous_tp;
     };
 
-    std::shared_ptr<threadpool_context> ctx;
+    std::shared_ptr<workerpool_context> ctx;
 };
 
-bool in_threadpool();
-threadpool& current_threadpool();
-threadpool& default_threadpool();
+bool in_workerpool();
+
+// keeping a copy of the workerpool (for instance, in an atom) can cause the 
+// workerpool to never go out of scope, causing a memory leak. Try to always 
+// use this function inline instead of caching it.
+workerpool current_workerpool(); 
+
+// set the worker thread count (only effective if default_workerpool() has not 
+// yet been called, as that function forces initialization).
+void set_default_workerpool_worker_count(size_t cnt);
+
+// keeping a copy of the workerpool (for instance, in an atom) can cause the 
+// workerpool to never go out of scope, causing a memory leak. Try to always 
+// use this function inline instead of caching it.
+workerpool default_workerpool();
 
 
 
 //-----------------------------------------------------------------------------
 // schedule an atom for execution on a worker thread in either the current 
-// threadpool, the current worker, or the default threadpool, in that order,
+// workerpool, the current worker, or the default workerpool, in that order,
 // as available.
 atom schedule(atom a);
 
@@ -1613,9 +1665,10 @@ atom schedule(F&& f, Ts&&... ts)
 // but by using atoms for their default shared_ptr behavior. 
 //
 // This non-blocking behavior is *extremely* efficient, it effectively allows 
-// regular functions to behave like threads, yet actually executing on a small 
-// number of worker threads, maximizing cpu usage while minimizing the cost of 
-// context switching.
+// regular functions to behave like threads, yet actually executing on a small
+// number of worker threads (typically identical in number to the count of 
+// available CPUs), maximizing cpu usage while minimizing the cost of context 
+// switching.
 //
 // When a continuation::send(send_val, send_cont) OR
 // continuation::recv(recv_cont) succeeds it will schedule send_cont for 

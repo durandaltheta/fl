@@ -1591,7 +1591,7 @@ private:
 // Fully supported coroutines can implement this behavior by allocating an 
 // entire stack (similar to a thread's call stack) where the coroutine can 
 // execute. This behavior is emulated here not through an allocated call stack, 
-// but by using the atoms for their default shared_ptr behavior. 
+// but by using atoms for their default shared_ptr behavior. 
 //
 // This non-blocking behavior is *extremely* efficient, it effectively allows 
 // regular functions to behave like threads, yet actually executing on a small 
@@ -1615,18 +1615,18 @@ private:
 
 int main()
 {
-    continuation cn = make_continuation();
-    channel ch = make_channel();
+    fl::continuation cn = fl::make_continuation();
+    fl::channel ch = fl::make_channel();
 
     // sender 
-    atom send_f = [=](int i)
+    fl::atom send_f = [=](int i)
     {
         if(i<2){ cn.send(++i,send_f); }
         else{ ch.send(0); }
     };
     
     // receiver 
-    atom recv_f = [=](int i)
+    fl::atom recv_f = [=](int i)
     {
         if(i<2)
         {

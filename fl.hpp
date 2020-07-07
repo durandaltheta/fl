@@ -634,6 +634,7 @@ inline atom reverse(atom lst)
     }
 }
 
+/*
 // return a value copy of a list
 inline atom copy_list(atom lst)
 {
@@ -654,6 +655,13 @@ inline atom copy_list(atom lst)
         copy(cdr(cur),nil());
         return ret;
     }
+}
+*/
+
+// copies any structure composed of cons_cells and any other atom
+inline atom copy_tree(atom lst)
+{
+    /* ... */
 }
 
 
@@ -1225,25 +1233,32 @@ iterator cend(fl::atom a){ return const_iterator(); }
 
 // channel is an interface (via std::shared_ptr) to an internal mechanism for 
 // sending atoms and retrieving atoms from a threadsafe queue. 
-//
-// It is *VERY IMPORTANT* that the user consider passing a deep copy 
-// (using copy(), copy_list(), or whatever function is relevant) of whatever 
-// atom or atomic structure you want to send, otherwise you risk both race 
-// conditions and random data invalidation if the underlying context is ever 
-// modified with set(). 
-//
-// However, you don't have to make a copy if the given atom is never used again.
-// A common example of this is when a local atom is created (explictly or 
-// implicitly) from other not-atom local variables for use in sending through a 
-// channel.
-//
-// Example (given atom a):
-//
-// atom b = copy_list(a);
-// ch.send(b); 
 
 namespace fl {
-class channel
+namespace detail {
+template <typename T>
+class base_channel
+{
+public:
+    //Should include the following:
+    /*
+     derived_channel()
+     derived_channel(const derived_channel& rhs)
+     derived_channel(derived_channel&& rhs)
+     derived_channel& operator=(const derived_channel& rhs)
+     derived_channel& operator=(derived_channel&& rhs)
+     */
+    typedef T value;
+    virtual bool operator bool() = 0;
+    virtual void make() = 0;
+    virtual bool send(atom a) = 0;
+    virtual bool recv(atom& a) = 0;
+    template <typename T> virtual bool send(T&& t) = 0;
+    template <typename T> virtual bool recv(T& t) = 0;
+};
+}
+
+class channel : public base_channel<atom>
 {
 public:
     inline channel(){}
@@ -1272,14 +1287,14 @@ public:
     inline bool recv(atom& a){ return ctx->recv(a); }
 
     template <typename T>
-    inline bool send(T&& t){ return ctx->send(atom(std::forward<T>(t))); }
+    bool send(T&& t){ return ctx->send(atom(std::forward<T>(t))); }
 
     template <typename T>
-    inline bool recv(T& t)
+    bool recv(T& t)
     { 
-        atom a;
+        atom a(std::move(t));
         bool success = ctx->recv(a); 
-        t = value<T>(a);
+        t = extract<T>(a);
         return success;
     }
 
@@ -1310,10 +1325,11 @@ private:
 
         inline bool send(atom a)
         {
+            atom s = copy_tree(a);
             std::unique_lock<std::mutex> lk(mtx);
             if(!closed)
             {
-                lst.push_back(a);
+                lst.push_back(s);
                 non_empty_cv.notify_one();
                 return true;
             }
@@ -1566,96 +1582,185 @@ private:
 //-----------------------------------------------------------------------------
 // continuation 
 //
-// A continuation is just syntactic sugar for passing the result of eval()ing 
-// an atom to a channel.
+// A continuation is a special channel which implements non-blocking behavior by 
+// scheduling functions (continuations) that will continue the current operation 
+// when a send/recv can succeed. This is a variation of a technique known in the 
+// lisp world as "continuation passing" style.
 //
-// The real trick is realizing that the returned value can be a list of a 
-// function and arguments, and the target channel can be be a threadpool or 
-// worker. In short, you can continually reschedule an operation in a fashion 
-// similar to coroutines which can achieve single (or multi) threaded 
-// concurrency.
+// In practice, this behavior is essentially an implementation of "coroutines".
+// Fully supported coroutines can implement this behavior by allocating an 
+// entire stack (similar to a thread's call stack) where the coroutine can 
+// execute. This behavior is emulated here not through an allocated call stack, 
+// but by using the atoms for their default shared_ptr behavior. 
 //
-// Example:
+// This non-blocking behavior is *extremely* efficient, it effectively allows 
+// regular functions to behave like threads, yet actually executing on a small 
+// number of worker threads, maximizing cpu usage while minimizing the cost of 
+// context switching.
+//
+// When a continuation::send(send_val, send_cont) OR
+// continuation::recv(recv_cont) succeeds it will schedule send_cont for 
+// evaluation with send_val as an argument, while scheduling recv_cont with a 
+// copy (default copy function is a deep copy with copy_tree()) of send_val. 
+// An alternate fl::function can be provided to make() as the copy function if 
+// necessary for efficiency.
+//
+// If there are no receivers when a send() occurs the send operation will be 
+// cached until the next recv() call. The same is true if there are no senders 
+// when a receive occurs until the next send() call.
+//
+// example:
 /*
 #include <fl/fl.hpp>
 
-// Classical recursive fibonacci calculator
-int recursive_fib(int x)
-{
-    if((x==1)||(x==0)){ return(x); }
-    else{ return(fib(x-1)+fib(x-2)); }
-}
-
-// Multithreaded coroutine-like continuation based fibonacci calculator. Is it 
-// efficient? Of course not. Is it fast? No. Is it a working example? You bet.
-int continuation_fib(threadpool tp, int x)
-{
-    channel return_ch = make_channel(1);
-
-    auto schedule = [=](atom a){ fl::current_worker->threadpool_task_channel().send(a); };
-
-    auto fib = [=](int x, channel return_ch)
-    {
-        fl::channel tp_task_ch = fl::current_worker->threadpool_task_channel();
-
-        if((x==1)||(x==0)){ return_ch.send(x); }
-        else
-        { 
-            auto fib_cont1 = [=](int x)
-            {
-                channel cont_ch1 = make_channel(1);
-
-                auto fib_cont2 = [=](int x)
-                {
-                    atom r1;
-                    cont_ch1.recv(r1);
-                    channel cont_ch2 = make_channel(1);
-
-                    auto final_ret = [=](int r1)
-                    {
-                        atom r2;
-                        cont_ch2.recv(r2);
-                        return_ch.send(r1+r2);
-                    };
-
-                    schedule(fl::atom([]
-                    { 
-                        fib(x-2, cont_ch2);
-                        tp_task_ch.send(fl::list(final_ret, r1)); 
-                    })); 
-                };
-
-                schedule(fl::atom([]
-                { 
-                    fib(x-1,cont_ch1);
-                    tp_task_ch.send(fl::list(fib_cont2, x)); 
-                })); 
-            };
-
-            schedule(fl::atom([]{ tp_task_ch.send(fl::list(fib_con1, x)); })); 
-        }
-    };
-
-    tp.task_channel().send(fl::list(fib,x,return_ch));
-
-    int ret=0;
-    return_ch.recv(ret);
-    return ret;
-}
-
-
 int main()
 {
-    fl::threadpool tp;
-    tp.start(); 
+    continuation cn = make_continuation();
+    channel ch = make_channel();
 
-    for(int i=0; i<9; ++i){ std::cout << recursive_fib(i) << " "; }
-    std::cout << recursive_fib(10) << std::endl;
+    // sender 
+    atom send_f = [=](int i)
+    {
+        if(i<2){ cn.send(++i,send_f); }
+        else{ ch.send(0); }
+    };
+    
+    // receiver 
+    atom recv_f = [=](int i)
+    {
+        if(i<2)
+        {
+            std::cout << i << std::endl;
+            cn.recv(recv_f);
+        }
+        else{ ch.send(0; }
+    };
 
-    for(int i=0; i<9; ++i){ std::cout << continuation_fib(tp,i) << " "; }
-    std::cout << continuation_fib(tp,10) << std::endl; 
+    cn.send(send_f,-1);
+    cn.recv(recv_f);
+
+    // synchronize with worker functions
+    i=0;
+    ch.recv(i);
+    ch.recv(i);
+    return 0;
 }
+// program output should be:
+// 0
+// 1
+// 2
  */
+class continuation : public base_channel<atom>
+{
+public:
+    continuation(){}
+    continuation(const continuation& rhs) : ctx(rhs.ctx) {}
+    continuation(continuation&& rhs) : ctx(std::move(rhs.ctx)) {}
+
+    inline continuation& operator=(const continuation& rhs)
+    {
+        ctx = rhs.ctx;
+        return *this;
+    }
+
+    inline continuation& operator=(continuation&& rhs)
+    {
+        ctx = std::move(rhs.ctx);
+        return *this;
+    }
+
+    inline bool operator bool(){ return ctx ? true : false; }
+    inline void make(){ ctx = std::make_shared<continuation_context>(); }
+    inline void make(atom copy_func){ ctx = std::make_shared<continuation_context>(copy_func); }
+    inline bool send(atom val, atom cont){ return ctx->send(val,cont); }
+    inline bool recv(atom cont){ return ctx->recv(cont); }
+
+    template <typename T, typename F> 
+    bool send(T&& t, F&& f)
+    { 
+        return ctx->send(atom(std::forward<T>(t)), atom(std::forward<F>(f))); 
+    }
+
+    template <typename T, typename F> 
+    bool recv(F&& f)
+    {  
+        return ctx->recv(atom(std::forward<F>(f))); 
+    }
+
+private:
+    struct continuation_context 
+    {
+        continuation_context() : closed(false), copy_func(copy_tree) {}
+        continuation_context(atom in_copy_func) : closed(false), copy_func(in_copy_func) {}
+
+        inline bool send(atom send_val, atom send_cont)
+        { 
+            atom recv_val = eval(list(copy_func,send_val));
+
+            std::unique_lock<std::mutex> lk(mtx);
+            if(closed){ return false; }
+            else
+            {
+                if(receivers.size())
+                {
+                    atom recv_cont = receivers.front();
+                    receivers.pop_front();
+                    atom send_val = car(s);
+                    atom send_cont = cdr(s);
+                    schedule(atom([=]{ eval(list(recv_cont, recv_val)); }));
+                    schedule(atom([=]{ eval(list(send_cont, send_val)); }));
+                }
+                else{ senders.push_back(cons(recv_val,cons(send_val,send_cont))); }
+                return true;
+            }
+        }
+
+        inline bool recv(atom recv_cont)
+        { 
+            std::unique_lock<std::mutex> lk(mtx);
+            if(closed){ return false; }
+            else
+            {
+                if(senders.size())
+                {
+                    atom s = senders.front();
+                    senders.pop_front();
+                    atom recv_val = car(s);
+                    atom ccell = cdr(s);
+                    atom send_val = car(ccell);
+                    atom send_cont = cdr(ccell);
+                    schedule(atom([=]{ eval(list(recv_cont, recv_val)); }));
+                    schedule(atom([=]{ eval(list(send_cont, send_val)); }));
+                }
+                else{ receivers.push_back(recv_cont); }
+                return true;
+            }
+        }
+
+        std::mutex mtx;
+        std::condition_variable cv;
+        bool closed;
+        std::list<atom> senders;
+        std::list<atom> receivers;
+        atom copy_func;
+    };
+
+    std::shared_ptr<continuation_context> ctx;
+};
+
+continuation make_continuation()
+{
+    continuation cn;
+    cn.make();
+    return cn;
+}
+
+continuation make_continuation(atom copy_func)
+{
+    continuation cn;
+    cn.make();
+    return cn;
+}
 
 } // end fl
 

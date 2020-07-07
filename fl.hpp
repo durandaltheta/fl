@@ -190,7 +190,7 @@ curry<std::function<R(T)>>
         [=](atom a) {
             return curry<std::function<R(atom)>>(
                 [=](Ts&&...ts){
-                    return fun(value<T>(a));
+                    return fun(atom_cast<T>(a));
                 }
             ).result;
         }
@@ -240,7 +240,7 @@ curry<std::function<R(T,Ts...)>>
     result(
         [=](a){
             return curry<std::function<R(Ts...)>>(
-                [=](Ts&&...ts){ return fun(value<T>(a), ts...); }
+                [=](Ts&&...ts){ return fun(atom_cast<T>(a), ts...); }
             ).result;
         }
     ) 
@@ -268,7 +268,7 @@ curry(R(* const f)(Ts...))
 
 
 namespace detail {
-// apply atoms one at a time to curried function
+// final variations
 atom eval_curried_function(const function& f, atom a){ return f(a); }
 atom eval_curried_function(function&& f, atom a){ return f(a); }
 
@@ -352,7 +352,7 @@ public:
     atom(atom&& rhs) : a(std::move(rhs.ctx)) {}
 
     template <typename T>
-    atom(T&& t){ set(std::forward<T>(t); }
+    atom(T&& t){ set(std::forward<T>(t)); }
 
     // compare atom's real typed T values with the == operator 
     inline bool equalv(atom b) const { return caf(*this,b); }
@@ -363,9 +363,80 @@ public:
     template <typename T>
     inline bool equalv(T&& t) const { return caf(*this,atom(std::forward<T>(t))); }
 
+    bool operator==(const atom& rhs){ return equalv(rhs); }
+    bool operator==(atom&& rhs){ return equalv(rhs); }
+    template <typename T> bool operator==(T&& rhs){ return equalv(atom(std::forward<T>(rhs))); }
+
     inline bool equalp(atom b) const { return ctx.get() == b.ctx.get() }
 
-    bool is_nil() const { return ctx ? false : true; }
+    // atom_cast(), set() and extract() allow modification of the underlying 
+    // std::any context. Modifying this will modify *ALL* atoms that have 
+    // copies of the shared_ptr<context> 
+
+    // any cast the atom's value. This is the most flexible and most dangerous 
+    // way to get the value from an atom. Since this is a direct forward of 
+    // std::any_cast it allows returning mutable references of the stored 
+    // value.
+    template <typename T>
+    T atom_cast(){ return std::any_cast<T>(ctx->a); }
+
+    // get atom's value as a const reference to the specified type
+    template <typename T> 
+    const unqualified<T>& 
+    value() const { return std::any_cast<const unqualified<T>&>(ctx->a); }
+
+    // set() is capable of changing the underlying stored type, not just the 
+    // stored value.
+    
+    // c-string variant to ensure we can compare with std::string
+    void set(const char* t) 
+    { 
+        static REGISTER_TYPE__(std::string);
+        std::string s(t);
+        ctx = make_atom_context(std::move(s), std::false_type());
+    }
+
+    template <typename T> 
+    void set(T&& t) 
+    { 
+        static REGISTER_TYPE__(T);
+        ctx = make_atom_context(std::forward<T>(t), std::is_function<unqualified<T>>());
+    }
+
+    atom& operator=(const atom& rhs)
+    {
+        ctx = rhs.ctx;
+        return *this; 
+    }
+
+    atom& operator=(atom&& rhs)
+    {
+        ctx = std::move(rhs.ctx);
+        return *this; 
+    }
+
+    template <typename T>
+    atom& operator=(T&& rhs)
+    {
+        set(std::forward<T>(rhs));
+        return *this; 
+    }
+
+    // Returns an rvalue reference allowing code to use move semantics to 
+    // extract data from the internal context. This means that the data stored 
+    // in the context will be in a valid but unknown state.
+    template <typename T>
+    unqualified<T>&& extract(){ return std::any_cast<unqualified<T>&&>(ctx->a); }
+
+    // Make a deep copy of the current atom
+    inline atom copy() const
+    {
+        atom b;
+        *(b.ctx) = *(a.ctx);
+        return b;
+    }
+
+    inline bool is_nil() const { return ctx ? false : true; }
 
     template <typename T>
     bool is() const
@@ -375,58 +446,18 @@ public:
         {
             try 
             {
-                const auto& ref = std::any_cast<const unqualified<T>&>(ctx->a);
+                const auto& ref = value<T>(ctx->a);
                 return true;
             }
             catch(...){ return false; }
         } 
     };
 
-    // get atom's value as a const reference to the specified type
-    template <typename T> 
-    const unqualified<T>& 
-    value() const { return std::any_cast<const unqualified<T>&>(ctx->a); }
-
-    inline atom copy() const
-    {
-        atom b;
-        *(b.ctx) = *(a.ctx);
-        return b;
-    }
-
-    // set() functions and extract() are only way to reset or modify the 
-    // underlying context. Modifying this will modify *ALL* atoms that have 
-    // copies of the current shared_ptr<context> 
-    
-    // c-string variant to ensure we can compare with std::string
-    void set(const char* t) 
-    { 
-        static REGISTER_TYPE__(std::string);
-        std::string s(t);
-        ctx = make_context(std::move(s), std::false_type());
-    }
-
-    template <typename T> 
-    void set(T&& t) 
-    { 
-        static REGISTER_TYPE__(T);
-        ctx = make_context(std::forward<T>(t), std::is_function<unqualified<T>>());
-    }
-
-    // Returns an rvalue reference allowing code to use move semantics to 
-    // extract data from the internal context. This means that the data stored 
-    // in the context will be in a valid but unknown state.
-    template <typename T>
-    unqualified<T>&& extract(){ return std::any_cast<unqualified<T>&&>(ctx->a); }
-
-
     // returns true if atom has a value, else false
     inline bool operator bool() const { return !is_nil(); }
-    inline bool operator==(const atom& b) const { return equalv(b); }
-    inline bool operator==(atom&& b) const { return equalv(*this,b); }
 
 private:
-    struct context 
+    struct atom_context 
     {
         std::any value;
 
@@ -455,15 +486,15 @@ private:
         }
     };
 
-    mutable std::shared_ptr<context> ctx;
+    mutable std::shared_ptr<atom_context> ctx;
 
-    context make_context(T&& t, std::true_type) const
+    atom_context make_atom_context(T&& t, std::true_type) const
     {
         auto f = to_fl_function(std::forward<T>(t));
         return std::make_shared<context>(std::move(f),compare_atom_function__<>);
     }
 
-    context make_context(T&& t, std::false_type) const
+    atom_context make_atom_context(T&& t, std::false_type) const
     {
         return std::make_shared<context>(std::forward<T>(t),compare_any_function__<T>);
     }
@@ -474,6 +505,7 @@ private:
 inline atom nil(){ return atom(); }
 inline bool is_nil(atom a){ return a.is_nil(); }
 template <typename T> bool is(atom a){ return a.is<T>(); }
+template <typename T> T atom_cast(){ return a.atom_cast<T>(); }
 template <typename T> const T& value(atom a){ return a.value<T>(); }
 
 inline bool equalv(atom lhs, atom rhs){ return lhs.equalv(rhs); }
@@ -486,7 +518,7 @@ template <typename T, typename T2> bool equalv(T&& lhs, T2&& rhs)
 
 inline bool equalp(atom lhs, atom rhs){ return lhs.equalp(rhs); }
 inline atom copy(atom a){ return a.copy(); }
-template <typename T> inline atom copy(T& t){ return atom(std::forward<T>(t)); }
+template <typename T> inline atom copy(T&& t){ return atom(std::forward<T>(t)); }
 template <typename T> void set(atom a, T&& t){ a.set(std::forward<T>(t)); }
 template <typename T> T&& extract(atom a){ return a.extract<T>(); }
 
@@ -731,6 +763,13 @@ inline atom eval(atom a)
         return value<const function&>(car(a))(cdr(a)); 
     }
     else{ return a; }
+}
+
+
+template <typename F, typename... Ts>
+inline atom eval(F&& f, Ts&&... ts)
+{ 
+    return eval(list(std::forward<F>(f),std::forward<Ts>(ts)...));
 }
 
 
@@ -1039,8 +1078,8 @@ atom foldrl(F&& f, size_t len, atom init, atom a, As... as)
 // convert an allocator aware container to an fl::list containing all elements 
 // of said container. The elements are returned in the reverse order traversed 
 // over the container, the list must be reverse()d if order matters (although 
-// rebuilding a list via foldl will have the same effect with the extra
-// functionality of operating on the data).
+// rebuilding a list via cons() during foldl will have the same effect with the 
+// extra functionality of operating on the data).
 template <typename C>
 atom atomize_container(C&& c, size_t idx=0, size_t len=0)
 {
@@ -1235,30 +1274,8 @@ iterator cend(fl::atom a){ return const_iterator(); }
 // sending atoms and retrieving atoms from a threadsafe queue. 
 
 namespace fl {
-namespace detail {
-template <typename T>
-class base_channel
-{
-public:
-    //Should include the following:
-    /*
-     derived_channel()
-     derived_channel(const derived_channel& rhs)
-     derived_channel(derived_channel&& rhs)
-     derived_channel& operator=(const derived_channel& rhs)
-     derived_channel& operator=(derived_channel&& rhs)
-     */
-    typedef T value;
-    virtual bool operator bool() = 0;
-    virtual void make() = 0;
-    virtual bool send(atom a) = 0;
-    virtual bool recv(atom& a) = 0;
-    template <typename T> virtual bool send(T&& t) = 0;
-    template <typename T> virtual bool recv(T& t) = 0;
-};
-}
 
-class channel : public base_channel<atom>
+class channel
 {
 public:
     inline channel(){}
@@ -1369,20 +1386,22 @@ channel make_channel(size_t capacity=1)
 
 
 //-----------------------------------------------------------------------------
-// thread worker 
-
-class workerpool;
-
+// worker 
+//
 // worker is an interface to an std::thread stored in an std::shared_ptr.
 //
 // The std::thread will continually call its function f on atoms received from 
-// the channel it was constructed with. This will continue until the worker's 
-// context std::shared_ptr goes out of scope, upon which calls to f will cease, 
-// the worker function will return and the thread joined.
+// its schedule() call. This will continue until the worker's context 
+// std::shared_ptr goes out of scope or halt() is called, upon which calls to f 
+// will cease, the worker function will return and the thread joined.
+
+class workerpool; // forward declaration
+
 class worker 
 {
 public:
-    inline worker(function f, channel in){ if(!ctx){ ctx = std::make_shared<worker_context>(this,f,c); } }
+    inline worker(){}
+    inline worker(function f){ start(this,f); }
     inline worker(const worker& rhs) : ctx(rhs.ctx) { }
     inline worker(worker&& rhs) : ctx(std::move(rhs.ctx)) { }
 
@@ -1400,6 +1419,13 @@ public:
 
     bool operator bool(){ return ctx ? true : false; }
 
+    inline void start(function f)
+    {
+        if(!ctx){ ctx = std::make_shared<worker_context>(this,f); }
+    }
+
+    inline bool halt(){ ctx->halt(); }
+
     inline void schedule(atom a){ return ctx->schedule(a); }
 
     template <typename F, typename... Ts>
@@ -1408,15 +1434,12 @@ public:
         return schedule(list(std::forward<F>(f),std::forward<Ts>(ts)...));
     }
 
-    inline bool halt(){ ctx->halt(); }
-
 private:
     struct worker_context 
     {
     public:
-        inline worker_context(worker* parent_w, function f, channel in) : parent_tp(nullptr)
+        inline worker_context(worker* parent_w, function f) : parent_tp(nullptr), ch(make_channel())
         {
-            ch = in;
             run = std::make_shared<bool>(false);
             done = std::make_shared<bool>(false);
             thd = std::thread([&](function f)
@@ -1550,6 +1573,8 @@ public:
         ctx = std::make_shared<workerpool_context>(this, worker_count);
     }
 
+    inline void halt(){ ctx->halt(); }
+
     inline size_t worker_count(){ return ctx->worker_count(); }
 
     inline void schedule(atom a){ return ctx->schedule(a); }
@@ -1597,13 +1622,16 @@ private:
             return workers.size(); 
         }
 
-        ~workerpool_context()
+        inline void halt()
         {
+            std::unique_lock<std::mutex> lk(mtx);
             for(auto cur = workers.begin(); cur!=workers.end(); ++cur)
             {
                 cur->halt();
             }
         }
+
+        ~workerpool_context(){ halt(); }
 
     private:
         std::mutex mtx;
@@ -1722,7 +1750,7 @@ int main()
 // 1
 // 2
  */
-class continuation : public base_channel<atom>
+class continuation 
 {
 public:
     continuation(){}
@@ -1748,7 +1776,7 @@ public:
     inline bool close(){ return ctx->closed(); }
     inline bool send(atom val, atom cont){ return ctx->send(val,cont); }
     inline bool send(atom val){ return ctx->send(val); }
-    inline bool recv(atom cont){ return ctx->recv(cont); }
+    inline bool recv(atom& cont){ return ctx->recv(cont); }
 
     template <typename T, typename F> 
     bool send(T&& t, F&& f)

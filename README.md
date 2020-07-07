@@ -1,6 +1,6 @@
 # fl
 ## Rationale 
-This project is a header only library which enables lisp-like functional programming in c++ providing the following functionality:
+This project is a library which enables lisp-like functional programming in c++ providing the following functionality:
 
 - generic datatype `atom`:
     - can accept any value

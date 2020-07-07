@@ -1485,6 +1485,9 @@ private:
     friend class threadpool;
 };
 
+bool in_worker();
+worker& current_worker();
+
 
 
 //-----------------------------------------------------------------------------
@@ -1510,8 +1513,6 @@ public:
     }
 
     bool operator bool(){ return ctx ? true : false; }
-
-    threadpool& current_threadpool();
 
     inline void start(size_t worker_count=std::thread::hardware_concurrency())
     {
@@ -1577,6 +1578,24 @@ private:
     std::shared_ptr<threadpool_context> ctx;
 };
 
+bool in_threadpool();
+threadpool& current_threadpool();
+threadpool& default_threadpool();
+
+
+
+//-----------------------------------------------------------------------------
+// schedule an atom for execution on a worker thread in either the current 
+// threadpool, the current worker, or the default threadpool, in that order,
+// as available.
+atom schedule(atom a);
+
+template <typename F, typename... Ts>
+atom schedule(F&& f, Ts&&... ts)
+{
+    return schedule(list(std::forward<F>(f),std::forward<Ts>(ts)...));
+}
+
 
 
 //-----------------------------------------------------------------------------
@@ -1636,7 +1655,7 @@ int main()
         else{ ch.send(0; }
     };
 
-    cn.send(send_f,-1);
+    cn.send(-1, send_f);
     cn.recv(recv_f);
 
     // synchronize with worker functions
@@ -1672,13 +1691,22 @@ public:
     inline bool operator bool(){ return ctx ? true : false; }
     inline void make(){ ctx = std::make_shared<continuation_context>(); }
     inline void make(atom copy_func){ ctx = std::make_shared<continuation_context>(copy_func); }
+    inline void close(){ ctx->close(); }
+    inline bool close(){ return ctx->closed(); }
     inline bool send(atom val, atom cont){ return ctx->send(val,cont); }
+    inline bool send(atom val){ return ctx->send(val); }
     inline bool recv(atom cont){ return ctx->recv(cont); }
 
     template <typename T, typename F> 
     bool send(T&& t, F&& f)
     { 
         return ctx->send(atom(std::forward<T>(t)), atom(std::forward<F>(f))); 
+    }
+
+    template <typename T, typename F> 
+    bool send(T&& t)
+    { 
+        return ctx->send(atom(std::forward<T>(t))); 
     }
 
     template <typename T, typename F> 
@@ -1692,6 +1720,18 @@ private:
     {
         continuation_context() : closed(false), copy_func(copy_tree) {}
         continuation_context(atom in_copy_func) : closed(false), copy_func(in_copy_func) {}
+
+        inline void close()
+        {
+            std::unique_lock<std::mutex> lk(mtx);
+            closed=true;
+        }
+
+        inline bool closed()
+        {
+            std::unique_lock<std::mutex> lk(mtx);
+            return closed;
+        }
 
         inline bool send(atom send_val, atom send_cont)
         { 
@@ -1714,6 +1754,8 @@ private:
                 return true;
             }
         }
+
+        inline bool send(atom send_val){ return send(send_val,atom([]{}); }
 
         inline bool recv(atom recv_cont)
         { 

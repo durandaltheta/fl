@@ -26,15 +26,17 @@ void fl::worker_context::set_current_worker(worker* w)
     g_current_worker = w; 
 }
 
-thread_local threadpool default_threadpool;
+thread_local threadpool g_default_threadpool;
 
-atom schedule(atom a)
+fl::threadpool& fl::default_threadpool()
+{ 
+    if(!g_default_threadpool){ g_default_threadpool.start(); }
+    return g_default_threadpool;
+}
+
+atom fl::schedule(atom a)
 {
     if(in_threadpool()){ return current_threadpool().schedule(a); }
     else if(in_worker()){ return current_worker().schedule(a); }
-    else 
-    {
-        if(!default_threadpool){ default_threadpool.start(); }
-        return default_threadpool.schedule(a);
-    }
+    else{ return default_threadpool().schedule(a); }
 }

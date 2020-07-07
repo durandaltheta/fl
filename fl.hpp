@@ -1394,6 +1394,58 @@ channel make_channel(size_t capacity=1)
 // its schedule() call. This will continue until the worker's context 
 // std::shared_ptr goes out of scope or halt() is called, upon which calls to f 
 // will cease, the worker function will return and the thread joined.
+//
+// Example:
+/*
+#include <fl/fl.hpp>
+
+struct message
+{
+    size_t command;
+    atom payload;
+    
+    message(size_t in_command) : command(in_command) { }
+    message(size_t in_command, atom in_payload) : command(in_command), payload(in_payload) { }
+};
+
+int main()
+{
+    channel done_ch = make_channel();
+
+    // w calls our custom function with whatever we send it with its schedule() 
+    // function
+    worker w([=](message& m)
+    {
+        switch(m.command)
+        {
+        case 0:
+            eval(m.payload);
+            break;
+        case 1:
+            eval([](std::string s){ std::cout << s << std::endl; }, m.payload);
+            break;
+        case 2:
+            std::cout << "world" << std::endl; 
+            break;
+        case 3:
+        default:
+            current_worker().halt(); // shutdown w
+            done_ch.send(0); // send done message back to main()
+            break;
+        }
+    });
+
+    w.schedule(message(0,[]{ std::cout << 3 << std::endl; }));
+    w.schedule(message(1,"hello"));
+    w.schedule(message(2));
+    w.schedule(message(3));
+
+    int done;
+    done_ch.recv(done);
+
+    return 0;
+}
+ */
 
 class workerpool; // forward declaration
 
@@ -1401,9 +1453,10 @@ class worker
 {
 public:
     inline worker(){}
-    inline worker(function f){ start(this,f); }
     inline worker(const worker& rhs) : ctx(rhs.ctx) { }
     inline worker(worker&& rhs) : ctx(std::move(rhs.ctx)) { }
+    inline worker(function f){ start(this,f); }
+    template <typename f> worker(F&& f){ start(this,std::forward<F>(f)); }
 
     inline worker& operator=(const worker& rhs)
     {
@@ -1419,9 +1472,12 @@ public:
 
     bool operator bool(){ return ctx ? true : false; }
 
-    inline void start(function f)
+    inline void start(function f){ ctx = std::make_shared<worker_context>(this,f); }
+
+    template <typename F>
+    inline void start(F&& f)
     {
-        if(!ctx){ ctx = std::make_shared<worker_context>(this,f); }
+        start(atomize_function(std::forward<F>(f)));
     }
 
     inline bool halt(){ ctx->halt(); }
@@ -1543,6 +1599,10 @@ worker current_worker();
 // objects. A workerpool will create N count of workers when its start() 
 // function is called, and will schedule atoms for evaluation to said workers 
 // when its schedule() function is called.
+//
+// All workers created with workerpool are passed the function eval(). Thus, 
+// workers in a workerpool are very generic, and are best used when efficient,
+// asynchronous computation is required.
 //
 // All workers will be halt()ed when the last workerpool to the shared context 
 // goes out of scope.
@@ -1705,6 +1765,9 @@ atom schedule(F&& f, Ts&&... ts)
 // An alternate fl::function can be provided to make() as the copy function if 
 // necessary for efficiency.
 //
+// An alternate send(send_val) variant is available if no continuation is 
+// required by the sending code.
+//
 // If there are no receivers when a send() occurs the send operation will be 
 // cached until the next recv() call. The same is true if there are no senders 
 // when a receive occurs until the next send() call.
@@ -1772,6 +1835,10 @@ public:
     inline bool operator bool(){ return ctx ? true : false; }
     inline void make(){ ctx = std::make_shared<continuation_context>(); }
     inline void make(atom copy_func){ ctx = std::make_shared<continuation_context>(copy_func); }
+
+    template <typename F>
+    void make(F&& copy_func){ make(atom(std::forward<F>(copy_func))); }
+
     inline void close(){ ctx->close(); }
     inline bool close(){ return ctx->closed(); }
     inline bool send(atom val, atom cont){ return ctx->send(val,cont); }
@@ -1881,8 +1948,69 @@ continuation make_continuation()
 continuation make_continuation(atom copy_func)
 {
     continuation cn;
-    cn.make();
+    cn.make(copy_func);
     return cn;
+}
+
+template <typename F>
+continuation make_continuation(F&& copy_func)
+{
+    continuation cn;
+    cn.make(atom(std::forward<F>(copy_func)));
+    return cn;
+}
+
+
+
+//-----------------------------------------------------------------------------
+// io  
+//
+// io is similar to continuation in that io() itself is non-blocking. io() will 
+// launch a new thread that will execute a function (io_call) after which, if a 
+// function cont was provided, it will schedule() cont on the original worker 
+// io() was called from.
+bool io(atom io_call, atom cont)
+{
+    if(in_worker())
+    {
+        worker cw = current_worker();
+        worker w(eval);
+        w.schedule([=]
+        {
+            eval(io_call);
+            cw.schedule(cont);
+            current_worker().halt();
+        });
+        return true;
+    }
+    else{ return false; }
+}
+
+template <typename IO, typename CONT>
+void io(IO&& io_f, CONT&& cont_f)
+{
+    io(list(std::forward<IO>(io_f),std::forward<CONT>(cont_f)));
+}
+
+bool io(atom io_call)
+{
+    if(in_worker())
+    {
+        worker w(eval);
+        w.schedule([=]
+        {
+            eval(io_call);
+            current_worker().halt();
+        });
+        return true;
+    }
+    else{ return false; }
+}
+
+template <typename IO, typename CONT>
+void io(IO&& io_f)
+{
+    io(list(std::forward<IO>(io_f)));
 }
 
 } // end fl

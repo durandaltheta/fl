@@ -7,7 +7,6 @@
 - [API list](#API-list)
 - [API list algorithms](#API-list-algorithms)
 - [API evaluation](#API-evaluation)
-- [API to_string](#API-to-string)
 - [API concurrency](#API-concurrency)
 - [API std](#API-std)
 - [Example Programs(#Example-Programs)
@@ -47,10 +46,23 @@ This project is a library which enables lisp-like functional programming in c++ 
 [Table of Contents](#Table-of-Contents)
 ### fl::atom 
 ### fl::to_string()
+### fl::nil()
+### fl::is_nil()
+### fl::is()
+### fl::atom_cast()
+### fl::value()
+### fl::equalv()
+### fl::equalp()
+### fl::copy()
+### fl::set()
+### fl::extract()
 
 ## API cons
 [Table of Contents](#Table-of-Contents)
-### fl::cons(), fl::car(), fl::cdr() 
+### fl::cons()
+### fl::is_cons()
+### fl::car()
+### fl::cdr() 
 
 ## API function
 [Table of Contents](#Table-of-Contents)

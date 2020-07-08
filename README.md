@@ -1,9 +1,11 @@
 # fl
 ## Table of Contents
 - [Rationale](#Rationale)
-- [API core](#API-core)
+- [API atom](#API-atom)
+- [API cons](#API-cons)
+- [API function](#API-function)
 - [API list](#API-list)
-- [API list iteration](#API-list-iteration)
+- [API list algorithms](#API-list-algorithms)
 - [API evaluation](#API-evaluation)
 - [API to_string](#API-to-string)
 - [API concurrency](#API-concurrency)
@@ -41,11 +43,19 @@ This project is a library which enables lisp-like functional programming in c++ 
 - ability to generically `fl::schedule()` atoms on a `fl::worker`/`fl::workerpool` 
 - ability to implement non-blocking communication & scheduling with `fl::continuation`
 
-## API core
+## API atom
 [Table of Contents](#Table-of-Contents)
 ### fl::atom 
-### fl::function
+### fl::to_string()
+
+## API cons
+[Table of Contents](#Table-of-Contents)
 ### fl::cons(), fl::car(), fl::cdr() 
+
+## API function
+[Table of Contents](#Table-of-Contents)
+### fl::function
+
 ## API list
 [Table of Contents](#Table-of-Contents)
 ### fl::list()
@@ -59,7 +69,8 @@ This project is a library which enables lisp-like functional programming in c++ 
 ### fl::tail()
 ### fl::nth()
 ### fl::reverse()
-## API list iteration 
+
+## API list algorithms
 [Table of Contents](#Table-of-Contents)
 ### fl::map()
 ### fl::mapl()
@@ -89,12 +100,11 @@ This project is a library which enables lisp-like functional programming in c++ 
 ### fl::assv()
 ### fl::assp()
 ### fl::assf()
+
 ## API evaluation
 [Table of Contents](#Table-of-Contents)
 ### fl::eval()
-## API to_string
-[Table of Contents](#Table-of-Contents)
-### fl::to_string()
+
 ## API concurrency
 [Table of Contents](#Table-of-Contents)
 ### fl::channel
@@ -102,6 +112,7 @@ This project is a library which enables lisp-like functional programming in c++ 
 ### fl::workerpool
 ### fl::continuation
 ### fl::io()
+
 ## API std:: 
 [Table of Contents](#Table-of-Contents)
 ### fl::iterator

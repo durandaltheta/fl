@@ -42,10 +42,12 @@ This project is a library which enables lisp-like functional programming in c++ 
 - ability to implement non-blocking communication & scheduling with `fl::continuation`
 
 ## API core
+[Table of Contents](#Table-of-Contents)
 ### fl::atom 
 ### fl::function
 ### fl::cons(), fl::car(), fl::cdr() 
 ## API list
+[Table of Contents](#Table-of-Contents)
 ### fl::list()
 ### fl::inspect_list()
 ### fl::is_list()
@@ -58,6 +60,7 @@ This project is a library which enables lisp-like functional programming in c++ 
 ### fl::nth()
 ### fl::reverse()
 ## API list iteration 
+[Table of Contents](#Table-of-Contents)
 ### fl::map()
 ### fl::mapl()
 ### fl::foldl()
@@ -87,15 +90,20 @@ This project is a library which enables lisp-like functional programming in c++ 
 ### fl::assp()
 ### fl::assf()
 ## API evaluation
+[Table of Contents](#Table-of-Contents)
 ### fl::eval()
-## API to_string()
+## API to_string
+[Table of Contents](#Table-of-Contents)
+### fl::to_string()
 ## API concurrency
+[Table of Contents](#Table-of-Contents)
 ### fl::channel
 ### fl::worker
 ### fl::workerpool
 ### fl::continuation
 ### fl::io()
 ## API std:: 
+[Table of Contents](#Table-of-Contents)
 ### fl::iterator
 ### fl::const_iterator
 ### std::begin()

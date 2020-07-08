@@ -22,7 +22,7 @@ This project is a library which enables lisp-like functional programming in c++ 
     - various utilities for interacting with atoms.
 - lisp-list implementation 
     - Implementation of cons_cells with `fl::cons()` (with `fl::car()`/`fl::cdr()`), acting as a freeform tree-like structure 
-    - ability to `fl::quote` `fl::atom`s to disable evaluation or unquote to re-enable 
+    - ability to `fl::quote()` `fl::atom`s to disable evaluation or unquote to re-enable 
     - ability to access or generate lists.
 - ability to stringify `fl::atom`s and lists
     - can acquire a string representation of an `fl::atom`s or lists stored type name(s) with:
@@ -63,6 +63,9 @@ This project is a library which enables lisp-like functional programming in c++ 
 ### fl::is_cons()
 ### fl::car()
 ### fl::cdr() 
+### fl::quote()
+### fl::is_quote()
+### fl::unquote()
 
 ## API function
 [Table of Contents](#Table-of-Contents)

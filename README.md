@@ -3,7 +3,6 @@
 - [Rationale](#Rationale)
 - [API atom](#API-atom)
 - [API cons](#API-cons)
-- [API function](#API-function)
 - [API list](#API-list)
 - [API list algorithms](#API-list-algorithms)
 - [API evaluation](#API-evaluation)
@@ -67,10 +66,6 @@ This project is a library which enables lisp-like functional programming in c++ 
 ### fl::is_quote()
 ### fl::unquote()
 
-## API function
-[Table of Contents](#Table-of-Contents)
-### fl::function
-
 ## API list
 [Table of Contents](#Table-of-Contents)
 ### fl::list()
@@ -84,6 +79,11 @@ This project is a library which enables lisp-like functional programming in c++ 
 ### fl::tail()
 ### fl::nth()
 ### fl::reverse()
+
+## API evaluation
+[Table of Contents](#Table-of-Contents)
+### fl::function
+### fl::eval()
 
 ## API list algorithms
 [Table of Contents](#Table-of-Contents)
@@ -115,10 +115,6 @@ This project is a library which enables lisp-like functional programming in c++ 
 ### fl::assv()
 ### fl::assp()
 ### fl::assf()
-
-## API evaluation
-[Table of Contents](#Table-of-Contents)
-### fl::eval()
 
 ## API concurrency
 [Table of Contents](#Table-of-Contents)

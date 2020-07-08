@@ -1,9 +1,12 @@
 # fl
 ## Table of Contents
 - [Rationale](#Rationale)
-- [API Core](#API-Core)
-- [API Extended](#API-Extended)
-- [API Concurrency](#API-concurrency)
+- [API core](#API-core)
+- [API list](#API-list)
+- [API list iteration](#API-list-iteration)
+- [API evaluation](#API-evaluation)
+- [API to_string](#API-to-string)
+- [API concurrency](#API-concurrency)
 - [API std](#API-std)
 - [Example Programs(#Example-Programs)
 
@@ -42,22 +45,50 @@ This project is a library which enables lisp-like functional programming in c++ 
 ### fl::atom 
 ### fl::function
 ### fl::cons(), fl::car(), fl::cdr() 
-## API extended
-### list construction and interaction
-#### fl::list()
-#### fl::inspect_list()
-#### fl::is_list()
-#### fl::length()
-#### fl::head_cons()
-#### fl::tail_cons()
-#### fl::nth_cons()
-#### fl::head()
-#### fl::tail()
-#### fl::nth()
-#### fl::reverse()
-### evaluation
-### list iteration
-### to_string()
+## API list
+### fl::list()
+### fl::inspect_list()
+### fl::is_list()
+### fl::length()
+### fl::head_cons()
+### fl::tail_cons()
+### fl::nth_cons()
+### fl::head()
+### fl::tail()
+### fl::nth()
+### fl::reverse()
+## API list iteration 
+### fl::map()
+### fl::mapl()
+### fl::foldl()
+### fl::foldll()
+### fl::foldr()
+### fl::foldrl()
+### fl::andmap()
+### fl::andmapl()
+### fl::ormap()
+### fl::ormapl()
+### fl::for_each()
+### fl::filter()
+### fl::remove() 
+### fl::remv()
+### fl::remp()
+### fl::remove_set()
+### fl::remsetv()
+### fl::remsetp()
+### fl::sort()
+### fl::member()
+### fl::memv()
+### fl::memp()
+### fl::memf()
+### fl::findf()
+### fl::assoc()
+### fl::assv()
+### fl::assp()
+### fl::assf()
+## API evaluation
+### fl::eval()
+## API to_string()
 ## API concurrency
 ### fl::channel
 ### fl::worker
@@ -65,6 +96,12 @@ This project is a library which enables lisp-like functional programming in c++ 
 ### fl::continuation
 ### fl::io()
 ## API std:: 
+### fl::iterator
+### fl::const_iterator
+### std::begin()
+### std::end()
+### std::cbegin() 
+### std::cend()
 
 
 ## Example programs

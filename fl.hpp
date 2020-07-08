@@ -378,12 +378,12 @@ public:
     // std::any_cast it allows returning mutable references of the stored 
     // value.
     template <typename T>
-    T atom_cast(){ return std::any_cast<T>(ctx->a); }
+    T atom_cast(){ return std::any_cast<T>(ctx->value); }
 
     // get atom's value as a const reference to the specified type
     template <typename T> 
     const unqualified<T>& 
-    value() const { return std::any_cast<const unqualified<T>&>(ctx->a); }
+    value() const { return std::any_cast<const unqualified<T>&>(ctx->value); }
 
     // set() is capable of changing the underlying stored type, not just the 
     // stored value.
@@ -393,14 +393,16 @@ public:
     { 
         static REGISTER_TYPE__(std::string);
         std::string s(t);
-        ctx = make_atom_context(std::move(s), std::false_type());
+        if(ctx){ *ctx = *(make_atom_context(std::move(s), std::false_type())); }
+        else{ ctx = make_atom_context(std::move(s), std::false_type()); }
     }
 
     template <typename T> 
     void set(T&& t) 
     { 
         static REGISTER_TYPE__(T);
-        ctx = make_atom_context(std::forward<T>(t), std::is_function<unqualified<T>>());
+        if(ctx){ *ctx = *(make_atom_context(std::move(s), std::false_type())); }
+        else{ ctx = make_atom_context(std::move(s), std::false_type()); }
     }
 
     atom& operator=(const atom& rhs)
@@ -426,7 +428,7 @@ public:
     // extract data from the internal context. This means that the data stored 
     // in the context will be in a valid but unknown state.
     template <typename T>
-    unqualified<T>&& extract(){ return std::any_cast<unqualified<T>&&>(ctx->a); }
+    unqualified<T>&& extract(){ return std::any_cast<unqualified<T>&&>(ctx->value); }
 
     // Make a deep copy of the current atom
     inline atom copy() const
@@ -446,7 +448,7 @@ public:
         {
             try 
             {
-                const auto& ref = value<T>(ctx->a);
+                const auto& ref = value<T>(ctx->value);
                 return true;
             }
             catch(...){ return false; }
@@ -459,12 +461,6 @@ public:
 private:
     struct atom_context 
     {
-        std::any value;
-
-        // the function pointer stored here knows what the stored type of value 
-        // is, allowing sane/correct comparison
-        detail::compare_atom_function caf;
-
         context(const context& rhs) : a(rhs.a), caf(rhs.caf) { }
         context(context&& rhs) : a(std::move(rhs.a)), caf(std::move(rhs.caf)) { }
 
@@ -484,17 +480,23 @@ private:
             caf = std::move(rhs.caf);
             return *this;
         }
+
+        std::any value;
+
+        // the function pointer stored here knows what the stored type of value 
+        // is, allowing sane/correct comparison
+        detail::compare_atom_function caf;
     };
 
     mutable std::shared_ptr<atom_context> ctx;
 
-    atom_context make_atom_context(T&& t, std::true_type) const
+    std::shared_ptr<atom_context> make_atom_context(T&& t, std::true_type) const
     {
         auto f = to_fl_function(std::forward<T>(t));
         return std::make_shared<context>(std::move(f),compare_atom_function__<>);
     }
 
-    atom_context make_atom_context(T&& t, std::false_type) const
+    std::shared_ptr<atom_context> make_atom_context(T&& t, std::false_type) const
     {
         return std::make_shared<context>(std::forward<T>(t),compare_any_function__<T>);
     }
@@ -690,17 +692,32 @@ inline atom copy_list(atom lst)
 }
 */
 
-// copies any structure composed of cons_cells and any other atom
+// copies any structure composed of cons_cells and any other atom 
+namespace detail {
+inline atom copy_tree(atom& ret, atom lst)
+{
+    if(is_cons(lst))
+    {
+        ret = cons(copy(car(lst)),copy(cdr(lst)));
+        copy_tree(car(ret),car(lst));
+        copy_tree(cdr(ret),cdr(lst));
+    }
+    else{ ret = copy(lst); }
+}
+}
+
 inline atom copy_tree(atom lst)
 {
-    /* ... */
+    atom ret;
+    detail::copy_tree(ret,lst)
+    return ret;
 }
 
 
 namespace detail {
 atom append_(atom lst1, atom lst2)
 {
-    atom meta_lst = detail::copy_list(lst1);
+    atom meta_lst = detail::copy_tree(lst1);
     *(meta_lst.tail.a) = lst2; // do not make a copy of tail
     return meta_lst.head;
 
@@ -709,7 +726,7 @@ atom append_(atom lst1, atom lst2)
 template <typename... As>
 atom append_(atom lst1, atom lst2, As&&... as)
 {
-    atom meta_lst = detail::copy_list(lst1);
+    atom meta_lst = detail::copy_tree(lst1);
     *(meta_lst.tail.a) = append_(lst2, as...);
     return meta_lst.head;
 }
@@ -815,7 +832,7 @@ private:
         value_printer vp;
     };
 
-    std::string get_std_type_name(atom a){ return a.ctx->a.type().name(); }
+    std::string get_std_type_name(atom a){ return a.ctx->value.type().name(); }
    
     //integral to_string conversion
     template <typename T,
